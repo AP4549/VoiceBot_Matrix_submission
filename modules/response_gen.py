@@ -3,6 +3,7 @@ import boto3
 import pandas as pd
 from typing import Optional, Tuple
 from langdetect import detect
+from botocore.exceptions import ClientError
 from .utils import Config, load_qa_dataset, calculate_similarity
 
 class ResponseGenerator:
@@ -19,7 +20,8 @@ class ResponseGenerator:
         """Initialize AWS Bedrock client."""
         try:
             self.bedrock_client = boto3.client('bedrock-runtime')
-            self.model_id = self.config.get('llm', {}).get('model_id', 'anthropic.claude-v2')
+            self.model_id = self.config.get('llm', {}).get('model_id', 'anthropic.claude-3-sonnet-20240229-v1:0')
+            print(f"Debug: Bedrock client initialized with model_id: {self.model_id}")
         except Exception as e:
             print(f"Warning: Could not initialize Bedrock client: {e}")
             self.use_llm_fallback = False
@@ -57,34 +59,49 @@ class ResponseGenerator:
         try:            # Detect language and adjust prompt accordingly
             question_lang = self.detect_language(question)
             if question_lang == 'hi':
-                prompt = f"""You are a helpful customer service assistant. Please provide a response in Hindi to the following question:
-
-प्रश्न: {question}
-
-उत्तर:"""
+                messages = [
+                    {
+                        "role": "user",
+                        "content": f"आप एक सहायक ग्राहक सेवा सहायक हैं। कृपया निम्नलिखित प्रश्न का हिंदी में उत्तर दें:\n\nप्रश्न: {question}\n\nउत्तर:"
+                    }
+                ]
             else:
-                prompt = f"""You are a helpful customer service assistant. Please provide a clear and concise response to the following question:
-
-Question: {question}
-
-Response:"""
+                messages = [
+                    {
+                        "role": "user",
+                        "content": f"You are a helpful customer service assistant. Please provide a clear and concise response to the following question:\n\nQuestion: {question}\n\nResponse:"
+                    }
+                ]
 
             response = self.bedrock_client.invoke_model(
                 modelId=self.model_id,
                 body=json.dumps({
-                    "prompt": prompt,
-                    "max_tokens_to_sample": self.config.get('llm', {}).get('max_tokens', 500),
+                    "anthropic_version": "bedrock-2023-05-31", # Required for Claude 3
+                    "messages": messages,
+                    "max_tokens": self.config.get('llm', {}).get('max_tokens', 500),
                     "temperature": self.config.get('llm', {}).get('temperature', 0.7),
                     "top_p": 0.9,
                 })
             )
             
             response_body = json.loads(response['body'].read())
-            return response_body.get('completion', '')
+            # Extract content from the Messages API response
+            if response_body.get('content'):
+                # Find the first text content block
+                for content_block in response_body['content']:
+                    if content_block.get('type') == 'text':
+                        return content_block['text']
+            return '' # Return empty string if no text content found
             
-        except Exception as e:
-            print(f"Error getting LLM response: {e}")
+        except ClientError as e:
+            print(f"Error getting LLM response from Bedrock (ClientError): {e}")
+            if e.response and 'Error' in e.response:
+                print(f"AWS Error Code: {e.response['Error'].get('Code')}")
+                print(f"AWS Error Message: {e.response['Error'].get('Message')}")
             return None    
+        except Exception as e:
+            print(f"Error getting LLM response (General Exception): {e}")
+            return None
         
     def get_response(self, question: str) -> Tuple[str, str, float]:
         """Get response for a given question.

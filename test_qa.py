@@ -3,13 +3,8 @@ from modules.response_gen import ResponseGenerator
 
 # Test questions in both English and Hindi
 test_questions = [
-    "What is a savings account?",
-    "How do I open a bank account?",
-    "बैंक खाता कैसे खोलें?",
-    "बचत खाता क्या होता है?",
-    "ऋण के लिए क्या दस्तावेज़ चाहिए?",
-    "Tell me about NABARD",
-    "नाबार्ड के बारे में बताएं"
+    "Given my current financial situation with a modest income and a desire to save for a down payment on a house within the next five years, what specific savings strategies would you recommend, and what potential risks should I be aware of?",
+    "मैं अपनी छोटी सी दुकान के लिए बैंक से व्यवसाय ऋण लेना चाहता हूँ। मुझे इस प्रक्रिया में किन चुनौतियों का सामना करना पड़ सकता है, और मैं अपनी अनुमोदन संभावनाओं को कैसे बेहतर बना सकता हूँ?"
 ]
 
 def test_qa_system():
@@ -21,7 +16,7 @@ def test_qa_system():
         response, source, confidence = response_gen.get_response(question)
         print(f"Source: {source}")
         print(f"Confidence: {confidence:.2f}%")
-        print(f"Response: {response[:100]}...")  # Show first 100 chars
+        print(f"Response: {response[:500]}...")  # Show first 100 chars
 
 if __name__ == "__main__":
     test_qa_system()

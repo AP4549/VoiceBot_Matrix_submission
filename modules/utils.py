@@ -61,10 +61,11 @@ def load_qa_dataset() -> pd.DataFrame:
         df = pd.read_csv(qa_path)
         required_columns = ['Question', 'Response']
         if not all(col in df.columns for col in required_columns):
+            print(f"Debug: CSV file '{qa_path}' has columns: {list(df.columns)}")
             raise ValueError(f"CSV must contain columns: {required_columns}")
         return df
     except Exception as e:
-        print(f"Error loading QA dataset: {e}")
+        print(f"Error loading QA dataset from '{qa_path}': {e}")
         return pd.DataFrame(columns=['Question', 'Response'])
 
 def get_aws_credentials() -> Dict[str, str]:
