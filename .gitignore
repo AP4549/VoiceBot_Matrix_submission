@@ -4,7 +4,7 @@
 # Data folder
 Data/
 output/
-config.yaml
+
 
 # Python
 __pycache__/

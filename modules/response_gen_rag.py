@@ -10,12 +10,6 @@ from botocore.exceptions import ClientError
 import random # New import for random selection
 from .utils import Config, load_qa_dataset
 
-# Define paths for FAISS index and embeddings relative to the main project directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, 'data')
-EMBEDDINGS_FILE = os.path.join(DATA_DIR, 'qa_embeddings.npy')
-FAISS_INDEX_FILE = os.path.join(DATA_DIR, 'qa_faiss_index.bin')
-
 EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 CLAUDE_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
 BEDROCK_REGION = "us-west-2" # Ensure this matches your Bedrock region
@@ -29,7 +23,7 @@ class ResponseGeneratorRAG:
         "Right, let's find that out."
     ] # New: List of discourse markers
 
-    def __init__(self):
+    def __init__(self, faiss_index_path: str, embeddings_file_path: str):
         self.config = Config()
         self.qa_dataset = load_qa_dataset()
         self.semantic_similarity_threshold = self.config.get('response', {}).get('semantic_similarity_threshold', 0.50) # Adjusted threshold
@@ -44,7 +38,7 @@ class ResponseGeneratorRAG:
         self.qa_embeddings_array = None
 
         self._setup_aws_clients() # Setup all AWS clients
-        self._load_faiss_artifacts() # Load FAISS index and embeddings
+        self._load_faiss_artifacts(faiss_index_path, embeddings_file_path) # Pass paths to loading method
 
     def _setup_aws_clients(self):
         """Initialize AWS Bedrock and Translate clients."""
@@ -60,13 +54,13 @@ class ResponseGeneratorRAG:
             print(f"Warning: Could not initialize AWS clients: {e}")
             self.use_llm_fallback = False
 
-    def _load_faiss_artifacts(self):
+    def _load_faiss_artifacts(self, faiss_index_path: str, embeddings_file_path: str):
         """Load FAISS index and embeddings."""
         try:
-            print(f"Debug: Attempting to load FAISS index from: {FAISS_INDEX_FILE}")
-            print(f"Debug: Attempting to load embeddings from: {EMBEDDINGS_FILE}")
-            self.faiss_index = faiss.read_index(FAISS_INDEX_FILE)
-            self.qa_embeddings_array = np.load(EMBEDDINGS_FILE)
+            print(f"Debug: Attempting to load FAISS index from: {faiss_index_path}")
+            print(f"Debug: Attempting to load embeddings from: {embeddings_file_path}")
+            self.faiss_index = faiss.read_index(faiss_index_path)
+            self.qa_embeddings_array = np.load(embeddings_file_path)
             print(f"Debug: FAISS index and embeddings loaded")
         except Exception as e:
             print(f"Warning: Could not load FAISS index and embeddings: {e}")
