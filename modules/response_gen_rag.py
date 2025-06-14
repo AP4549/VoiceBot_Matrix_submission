@@ -7,12 +7,14 @@ import faiss
 from typing import Optional, Tuple, List
 from langdetect import detect
 from botocore.exceptions import ClientError
-import random # New import for random selection
+import random
 from .utils import Config, load_qa_dataset
+from indic_transliteration import sanscript
+from indic_transliteration.sanscript import transliterate
 
 EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 CLAUDE_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
-BEDROCK_REGION = "us-west-2" # Ensure this matches your Bedrock region
+BEDROCK_REGION = "us-west-2"
 
 class ResponseGeneratorRAG:
     _discourse_markers = [
@@ -21,104 +23,101 @@ class ResponseGeneratorRAG:
         "Just a moment...",
         "Thinking...",
         "Right, let's find that out."
-    ] # Updated: Now only English discourse markers
+    ]
 
     def __init__(self, faiss_index_path: str, embeddings_file_path: str):
         self.config = Config()
         self.qa_dataset = load_qa_dataset()
-        self.semantic_similarity_threshold = self.config.get('response', {}).get('semantic_similarity_threshold', 0.50) # Adjusted threshold
-        print(f"Debug: Semantic similarity threshold: {self.semantic_similarity_threshold}") # Added for debugging
+        self.semantic_similarity_threshold = self.config.get('response', {}).get('semantic_similarity_threshold', 0.50)
         self.use_llm_fallback = self.config.get('response', {}).get('use_llm_fallback', True)
-        self.top_k_retrieval = self.config.get('rag', {}).get('top_k_retrieval', 3) # Retrieve top 3 candidates
-        
-        self.bedrock_client = None # For LLM (Claude)
-        self.embedding_client = None # For Embeddings (Titan)
-        self.translate_client = None # For Translate
+        self.top_k_retrieval = self.config.get('rag', {}).get('top_k_retrieval', 3)
+
+        self.bedrock_client = None
+        self.embedding_client = None
+        self.translate_client = None
         self.faiss_index = None
         self.qa_embeddings_array = None
 
-        self._setup_aws_clients() # Setup all AWS clients
-        self._load_faiss_artifacts(faiss_index_path, embeddings_file_path) # Pass paths to loading method
+        self._setup_aws_clients()
+        self._load_faiss_artifacts(faiss_index_path, embeddings_file_path)
 
     def _setup_aws_clients(self):
-        """Initialize AWS Bedrock and Translate clients."""
         try:
             self.bedrock_client = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
-            print(f"Debug: Claude LLM client initialized with model_id: {CLAUDE_MODEL_ID}")
             self.embedding_client = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
-            print(f"Debug: Embedding client initialized with model_id: {EMBEDDING_MODEL_ID}")
-            
-            self.translate_client = boto3.client('translate', region_name=BEDROCK_REGION) # Initialize Translate client
-            print(f"Debug: Translate client initialized")
+            self.translate_client = boto3.client('translate', region_name=BEDROCK_REGION)
         except Exception as e:
             print(f"Warning: Could not initialize AWS clients: {e}")
             self.use_llm_fallback = False
 
     def _load_faiss_artifacts(self, faiss_index_path: str, embeddings_file_path: str):
-        """Load FAISS index and embeddings."""
         try:
-            print(f"Debug: Attempting to load FAISS index from: {faiss_index_path}")
-            print(f"Debug: Attempting to load embeddings from: {embeddings_file_path}")
             self.faiss_index = faiss.read_index(faiss_index_path)
             self.qa_embeddings_array = np.load(embeddings_file_path)
-            print(f"Debug: FAISS index and embeddings loaded")
         except Exception as e:
             print(f"Warning: Could not load FAISS index and embeddings: {e}")
-            self.use_llm_fallback = False # If FAISS fails, we can't do RAG effectively
+            self.use_llm_fallback = False
 
     def _get_discourse_marker(self) -> str:
-        """Randomly selects a discourse marker."""
         return random.choice(self._discourse_markers)
 
     def detect_language(self, text: str) -> str:
-        """Detect the language of the input text.
-        Prioritizes 'en' or 'hi' for better Hinglish handling.
-        """
         try:
             lang = detect(text)
-            # If detected language is not English or Hindi, default to Hindi
             if lang not in ['en', 'hi']:
                 return 'hi'
             return lang
         except:
-            print("Warning: Could not detect language, defaulting to Hindi for Hinglish.")
-            return 'hi'  # Default to Hindi if detection fails or is ambiguous
+            return 'hi'
+
+    def _is_hinglish(self, text: str) -> bool:
+        if not text:
+            return False
+        devanagari_count = sum('\u0900' <= c <= '\u097F' for c in text)
+        latin_count = sum('a' <= c.lower() <= 'z' for c in text if c.isalpha())
+        return devanagari_count == 0 and latin_count > 5
+
+    def polish_hinglish(self, raw_text: str) -> str:
+        prompt = f"""You are a helpful assistant that speaks in natural Hinglish (Hindi written in Roman script).
+Improve the readability of this sentence by making it more conversational, lowercase, and easy to understand.
+Avoid awkward capitalizations or phonetic symbols.
+
+Text: {raw_text}
+Improved Hinglish:"""
+
+        try:
+            response = self.bedrock_client.invoke_model(
+                modelId=CLAUDE_MODEL_ID,
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 200,
+                    "temperature": 0.3,
+                })
+            )
+            content_blocks = json.loads(response["body"].read()).get("content", [])
+            return content_blocks[0]["text"] if content_blocks and content_blocks[0].get("type") == "text" else raw_text
+        except Exception as e:
+            print("Hinglish polish error:", e)
+            return raw_text
 
     def _translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
-        """Translate text using Amazon Translate."""
         if not self.translate_client:
-            print("Error: Translate client not initialized.")
-            return text # Return original text if client not available
-        if source_lang == target_lang: # No translation needed
+            return text
+        if source_lang == target_lang:
             return text
         try:
-            print(f"Debug: Attempting to translate from {source_lang} to {target_lang}")
             response = self.translate_client.translate_text(
                 Text=text,
                 SourceLanguageCode=source_lang,
                 TargetLanguageCode=target_lang
             )
-            translated_text = response.get('TranslatedText')
-            if translated_text:
-                print(f"Debug: Translation successful.")
-                return translated_text
-            else:
-                print("Warning: Translate API returned empty text.")
-                return text
-        except ClientError as e:
-            print(f"Error translating text (ClientError): {e}")
-            if e.response and 'Error' in e.response:
-                print(f"AWS Error Code: {e.response['Error'].get('Code')}")
-                print(f"AWS Error Message: {e.response['Error'].get('Message')}")
-            return text # Return original text on error
-        except Exception as e:
-            print(f"General error translating text: {e}")
+            return response.get('TranslatedText', text)
+        except:
             return text
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        """Gets an embedding for the given text using Bedrock Titan Text Embeddings."""
         if not self.embedding_client:
-            print("Error: Embedding client not initialized.")
             return None
         try:
             body = json.dumps({"inputText": text})
@@ -130,184 +129,109 @@ class ResponseGeneratorRAG:
             )
             response_body = json.loads(response.get('body').read())
             embedding = response_body.get('embedding')
-            if not embedding:
-                print("Error: Embedding not found in Bedrock response.")
-                return None
-            return np.array(embedding).astype('float32')
-        except ClientError as e:
-            print(f"Error getting embedding from Bedrock (ClientError): {e}")
-            if e.response and 'Error' in e.response:
-                print(f"AWS Error Code: {e.response['Error'].get('Code')}")
-                print(f"AWS Error Message: {e.response['Error'].get('Message')}")
-            return None
-        except Exception as e:
-            print(f"General error getting embedding: {e}")
+            return np.array(embedding).astype('float32') if embedding else None
+        except:
             return None
 
     def find_best_matches_faiss(self, question: str) -> List[Tuple[str, float]]:
-        """Find the best matching questions/responses using FAISS and semantic similarity.
-        Returns a list of (response_text, confidence_score) tuples.
-        """
         if self.faiss_index is None or self.qa_embeddings_array is None or self.qa_dataset is None:
-            print("Warning: FAISS index or embeddings not loaded. Cannot perform FAISS search.")
             return []
-
         query_embedding = self._get_embedding(question)
         if query_embedding is None:
-            print("Warning: Could not get embedding for question. Cannot perform FAISS search.")
             return []
-
-        query_embedding = query_embedding.reshape(1, -1) # Reshape for FAISS search
-
+        query_embedding = query_embedding.reshape(1, -1)
         distances, indices = self.faiss_index.search(query_embedding, self.top_k_retrieval)
-        
         results = []
         for i in range(len(indices[0])):
             idx = indices[0][i]
             dist = distances[0][i]
-
-            # Calculate cosine similarity from L2 distance (assuming unit-normalized embeddings)
             similarity_score = 1 - (dist**2) / 2 
-            confidence_score = max(0.0, min(100.0, similarity_score * 100)) # Clamp to 0-100
-            
+            confidence_score = max(0.0, min(100.0, similarity_score * 100))
             response_text = self.qa_dataset.iloc[idx]['Response']
             results.append((response_text, confidence_score))
-
         return results
 
     def get_llm_response(self, question: str, context_documents: Optional[List[str]] = None) -> Optional[str]:
-        """Get response from AWS Bedrock LLM, optionally using provided context documents."""
         if not self.use_llm_fallback:
             return None
-            
         try:
-            question_lang = self.detect_language(question)
-            
-            # Construct the prompt with context
             context_str = ""
             if context_documents:
-                context_str = "\n\nContext:\n"
-                for i, doc in enumerate(context_documents):
-                    context_str += f"Document {i+1}: {doc}\n"
-                context_str += "\n"
+                context_str = "\n\nContext:\n" + "\n".join([f"Document {i+1}: {doc}" for i, doc in enumerate(context_documents)]) + "\n"
 
-            # Create a general prompt template that incorporates language instruction and context
-            # Make the language instruction prominent and instruct LLM to respond in target language and translate context if needed.
             full_prompt = f"""You are a helpful customer service assistant. Your primary goal is to answer the user's question in English.
 If the provided context documents are in a different language, translate them internally to English before answering.
 Answer the user's question ONLY using the provided context. If the context is insufficient, state that you cannot answer based on the provided information.
-
 {context_str}Question: {question}
 
 Response:"""
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": full_prompt
-                }
-            ]
-            print(f"Debug: Full prompt sent to LLM: {full_prompt[:500]}...") # Debug full prompt
-
+            messages = [{"role": "user", "content": full_prompt}]
             response = self.bedrock_client.invoke_model(
                 modelId=CLAUDE_MODEL_ID,
                 body=json.dumps({
-                    "anthropic_version": "bedrock-2023-05-31", # Required for Claude 3
+                    "anthropic_version": "bedrock-2023-05-31",
                     "messages": messages,
                     "max_tokens": self.config.get('llm', {}).get('max_tokens', 500),
                     "temperature": self.config.get('llm', {}).get('temperature', 0.7),
                     "top_p": 0.9,
                 })
             )
-            
             response_body = json.loads(response['body'].read())
-            print(f"Debug: Raw LLM response_body: {response_body}") # Added for debugging LLM raw response
-
             llm_generated_text = ''
             if response_body.get('content'):
                 for content_block in response_body['content']:
                     if content_block.get('type') == 'text':
                         llm_generated_text = content_block['text']
-            print(f"Debug: LLM generated text: {llm_generated_text[:100]}...") # Debug extracted LLM text
             return llm_generated_text
-            
-        except ClientError as e:
-            print(f"Error getting LLM response from Bedrock (ClientError): {e}")
-            if e.response and 'Error' in e.response:
-                print(f"AWS Error Code: {e.response['Error'].get('Code')}")
-                print(f"AWS Error Message: {e.response['Error'].get('Message')}")
-            return None    
-        except Exception as e:
-            print(f"Error getting LLM response (General Exception): {e}")
+        except:
             return None
-        
+
     def get_response(self, question: str) -> Tuple[str, str, float]:
-        """Get response for a given question using FAISS and LLM fallback.
-        
-        Returns:
-            Tuple of (response text, source ['dataset (FAISS)' or 'llm (augmented)' or 'llm'], confidence score)
-        """
         original_question_lang = self.detect_language(question)
-        
-        # Translate question to English for internal processing if not already English
         processed_question = question
         if original_question_lang != 'en':
             translated_question = self._translate_text(question, original_question_lang, 'en')
-            if translated_question and translated_question != question:
+            if translated_question:
                 processed_question = translated_question
-                print(f"Debug: Question translated from {original_question_lang} to English: {processed_question[:50]}...")
-            else:
-                print(f"Warning: Question translation failed or no change for {original_question_lang} to English.")
 
-        # Find best semantic matches from dataset using FAISS
         top_k_matches = self.find_best_matches_faiss(processed_question)
-        
-        best_dataset_response = None
-        best_dataset_score = 0.0
+        best_dataset_response = top_k_matches[0][0] if top_k_matches else None
+        best_dataset_score = top_k_matches[0][1] if top_k_matches else 0.0
 
-        if top_k_matches:
-            # The first match is the best one from FAISS
-            best_dataset_response, best_dataset_score = top_k_matches[0]
-
-        # If the best FAISS match is confident enough, use it directly from the dataset
         if best_dataset_response and best_dataset_score >= self.semantic_similarity_threshold:
             final_response_text = best_dataset_response
             final_source = 'dataset (FAISS)'
             final_confidence = best_dataset_score
-            
-        # If no good semantic match, but LLM fallback is enabled, use LLM (potentially with retrieved context)
         elif self.use_llm_fallback:
-            context_documents = [match[0] for match in top_k_matches if match[0]] # Extract just the text responses
-            
-            llm_response = self.get_llm_response(processed_question, context_documents=context_documents)
-            
+            context_documents = [match[0] for match in top_k_matches if match[0]]
+            llm_response = self.get_llm_response(processed_question, context_documents)
             if llm_response:
                 final_response_text = llm_response
                 final_source = 'llm (augmented with FAISS)' if context_documents else 'llm (no context)'
-                final_confidence = 100.0 # LLM confidence is typically 100% if it returns a response
+                final_confidence = 100.0
             else:
-                # If LLM didn't generate a response, fall back to best dataset match (low confidence)
                 final_response_text = best_dataset_response or "I'm sorry, I couldn't find a suitable response."
                 final_source = 'dataset (low confidence)'
                 final_confidence = best_dataset_score
         else:
-            # If LLM fallback is not enabled, return best dataset match (even if low confidence)
             final_response_text = best_dataset_response or "I'm sorry, I couldn't find a suitable response."
             final_source = 'dataset (low confidence)'
             final_confidence = best_dataset_score
 
-        # Add conversational nuance (in English first)
         conversational_prefix = self._get_discourse_marker() + " "
         final_response_text = conversational_prefix + final_response_text
 
-        # Post-processing: Translate final response back to original question language if needed
         if original_question_lang != 'en':
-            print(f"Debug: Translating final response from English to {original_question_lang}.")
             translated_response = self._translate_text(final_response_text, 'en', original_question_lang)
-            if translated_response and translated_response != final_response_text: # Check if translation actually occurred
+            if translated_response:
                 final_response_text = translated_response
                 final_source = f"{final_source} (translated back to {original_question_lang})"
-            else:
-                print(f"Warning: Final response translation failed or no change for English to {original_question_lang}.")
-        
-        return final_response_text, final_source, final_confidence 
+
+        if original_question_lang == 'hi' and self._is_hinglish(question):
+            hinglish_raw = transliterate(final_response_text, sanscript.DEVANAGARI, sanscript.ITRANS)
+            final_response_text = self.polish_hinglish(hinglish_raw)
+            final_source += " (transliterated and polished Hinglish)"
+
+        return final_response_text, final_source, final_confidence
+
