@@ -9,7 +9,9 @@ test_questions = [
 
 def test_qa_system():
     print("Testing QA System...")
-    response_gen = ResponseGeneratorRAG()
+    faiss_index_path = "Data/qa_faiss_index.bin"
+    embeddings_file_path = "Data/qa_embeddings.npy"
+    response_gen = ResponseGeneratorRAG(faiss_index_path=faiss_index_path, embeddings_file_path=embeddings_file_path)
     
     for question in test_questions:
         print("\n--- New Question ---")
