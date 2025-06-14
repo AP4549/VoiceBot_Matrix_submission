@@ -7,7 +7,8 @@ output_csv: output/output.csv
 
 # AWS Services Configuration
 transcribe:
-  language_code: en-US
+  language_code: hi-IN
+  identify_language: true
   sample_rate: 16000
   channels: 1
 
