@@ -28,7 +28,7 @@ def run_inference(csv_file=None):
     except Exception as e:
         error_msg = f"Error reading test CSV file: {e}"
         print(error_msg)
-        return None, error_msg
+        return None, error_msg, pd.DataFrame()
 
     results = []
     for idx, row in test_df.iterrows():
@@ -55,7 +55,11 @@ def run_inference(csv_file=None):
     summary += f"Average confidence: {sum(r['Confidence'] for r in results) / len(results):.2f}%"
     
     print(summary)
-    return output_path, summary
+    
+    # Prepare preview of first 10 questions for Gradio
+    preview_df = test_df['Questions'].head(10).to_frame()
+    
+    return output_path, summary, preview_df
 
 def process_single_question(question):
     """Process a single question for the interactive Gradio interface"""
@@ -81,6 +85,8 @@ def create_gradio_interface():
                     with gr.Column():
                         output_file = gr.File(label="Output CSV")
                         result_text = gr.Textbox(label="Results Summary", lines=6)
+                gr.Markdown("## CSV Preview (First 10 Rows)")
+                csv_preview = gr.Dataframe(headers=["Questions"], type="pandas", row_count=10, col_count=1, interactive=False)
 
             with gr.Tab("Interactive QA"):
                 with gr.Row():
@@ -90,8 +96,8 @@ def create_gradio_interface():
                     with gr.Column():
                         answer_output = gr.Textbox(label="Answer", lines=10)
 
-            # Event handlers
-            process_btn.click(run_inference, inputs=[csv_input], outputs=[output_file, result_text])
+            # Set up event handlers
+            process_btn.click(run_inference, inputs=[csv_input], outputs=[output_file, result_text, csv_preview])
             ask_btn.click(process_single_question, inputs=[question_input], outputs=[answer_output])
 
         demo.launch(share=False)

@@ -21,7 +21,7 @@ class ResponseGeneratorRAG:
         "Just a moment...",
         "Thinking...",
         "Right, let's find that out."
-    ] # New: List of discourse markers
+    ] # Updated: Now only English discourse markers
 
     def __init__(self, faiss_index_path: str, embeddings_file_path: str):
         self.config = Config()
@@ -71,16 +71,18 @@ class ResponseGeneratorRAG:
         return random.choice(self._discourse_markers)
 
     def detect_language(self, text: str) -> str:
-        """Detect the language of the input text."""
+        """Detect the language of the input text.
+        Prioritizes 'en' or 'hi' for better Hinglish handling.
+        """
         try:
-            # Langdetect might fail for short/ambiguous texts
             lang = detect(text)
-            # Map specific language codes if necessary, or just return as is
-            # For example, 'hi' for Hindi, 'en' for English.
+            # If detected language is not English or Hindi, default to Hindi
+            if lang not in ['en', 'hi']:
+                return 'hi'
             return lang
         except:
-            print("Warning: Could not detect language, defaulting to English.")
-            return 'en'  # Default to English if detection fails
+            print("Warning: Could not detect language, defaulting to Hindi for Hinglish.")
+            return 'hi'  # Default to Hindi if detection fails or is ambiguous
 
     def _translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
         """Translate text using Amazon Translate."""
@@ -191,8 +193,8 @@ class ResponseGeneratorRAG:
 
             # Create a general prompt template that incorporates language instruction and context
             # Make the language instruction prominent and instruct LLM to respond in target language and translate context if needed.
-            full_prompt = f"""You are a helpful customer service assistant. Your primary goal is to answer the user's question in {question_lang} language.
-If the provided context documents are in a different language, translate them internally to {question_lang} before answering.
+            full_prompt = f"""You are a helpful customer service assistant. Your primary goal is to answer the user's question in English.
+If the provided context documents are in a different language, translate them internally to English before answering.
 Answer the user's question ONLY using the provided context. If the context is insufficient, state that you cannot answer based on the provided information.
 
 {context_str}Question: {question}
@@ -245,8 +247,20 @@ Response:"""
         Returns:
             Tuple of (response text, source ['dataset (FAISS)' or 'llm (augmented)' or 'llm'], confidence score)
         """
+        original_question_lang = self.detect_language(question)
+        
+        # Translate question to English for internal processing if not already English
+        processed_question = question
+        if original_question_lang != 'en':
+            translated_question = self._translate_text(question, original_question_lang, 'en')
+            if translated_question and translated_question != question:
+                processed_question = translated_question
+                print(f"Debug: Question translated from {original_question_lang} to English: {processed_question[:50]}...")
+            else:
+                print(f"Warning: Question translation failed or no change for {original_question_lang} to English.")
+
         # Find best semantic matches from dataset using FAISS
-        top_k_matches = self.find_best_matches_faiss(question)
+        top_k_matches = self.find_best_matches_faiss(processed_question)
         
         best_dataset_response = None
         best_dataset_score = 0.0
@@ -265,7 +279,7 @@ Response:"""
         elif self.use_llm_fallback:
             context_documents = [match[0] for match in top_k_matches if match[0]] # Extract just the text responses
             
-            llm_response = self.get_llm_response(question, context_documents=context_documents)
+            llm_response = self.get_llm_response(processed_question, context_documents=context_documents)
             
             if llm_response:
                 final_response_text = llm_response
@@ -282,19 +296,18 @@ Response:"""
             final_source = 'dataset (low confidence)'
             final_confidence = best_dataset_score
 
-        # Post-processing: Ensure final response language matches question language
-        question_lang = self.detect_language(question)
-        response_lang = self.detect_language(final_response_text)
-
-        if question_lang != response_lang:
-            print(f"Debug: Mismatch in languages. Question: {question_lang}, Response: {response_lang}. Attempting translation.")
-            translated_response = self._translate_text(final_response_text, response_lang, question_lang)
-            if translated_response != final_response_text: # Check if translation actually occurred
-                final_response_text = translated_response
-                final_source = f"{final_source} (translated)"
-        
-        # Add conversational nuance
+        # Add conversational nuance (in English first)
         conversational_prefix = self._get_discourse_marker() + " "
         final_response_text = conversational_prefix + final_response_text
 
+        # Post-processing: Translate final response back to original question language if needed
+        if original_question_lang != 'en':
+            print(f"Debug: Translating final response from English to {original_question_lang}.")
+            translated_response = self._translate_text(final_response_text, 'en', original_question_lang)
+            if translated_response and translated_response != final_response_text: # Check if translation actually occurred
+                final_response_text = translated_response
+                final_source = f"{final_source} (translated back to {original_question_lang})"
+            else:
+                print(f"Warning: Final response translation failed or no change for English to {original_question_lang}.")
+        
         return final_response_text, final_source, final_confidence 
