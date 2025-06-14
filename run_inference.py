@@ -52,7 +52,6 @@ def run_inference(csv_file=None):
     summary += f"Processed {len(results)} questions\n"
     summary += f"Dataset matches: {sum(1 for r in results if 'dataset' in r['Source'])}\n"
     summary += f"LLM fallbacks: {sum(1 for r in results if 'llm' in r['Source'])}\n"
-    summary += f"Average confidence: {sum(r['Confidence'] for r in results) / len(results):.2f}%"
     
     print(summary)
     
@@ -61,18 +60,31 @@ def run_inference(csv_file=None):
     
     return output_path, summary, preview_df
 
-def process_single_question(question):
-    """Process a single question for the interactive Gradio interface"""
-    faiss_index_path = "Data/qa_faiss_index.bin"
-    embeddings_file_path = "Data/qa_embeddings.npy"
-    response_gen = ResponseGeneratorRAG(faiss_index_path=faiss_index_path, embeddings_file_path=embeddings_file_path)
-    response, source, confidence = response_gen.get_response(question)
-    return f"Response: {response}\n\nSource: {source}\nConfidence: {confidence:.2f}%"
-
 def create_gradio_interface():
-    """Create and launch the Gradio interface"""
+    """Create and launch the Gradio interface with the current color theme and added hover effects for buttons and tabs. Only the batch process tab is shown."""
     try:
-        with gr.Blocks(title="VoiceBot MATRIX - RAG QA System") as demo:
+        custom_css = """
+        .gr-button, .gradio-button, button, .gradio-file label, .gradio-file input[type='file']::file-selector-button {
+            transition: background 0.2s, box-shadow 0.2s, transform 0.1s;
+        }
+        .gr-button:hover, .gradio-button:hover, button:hover {
+            filter: brightness(0.95) contrast(1.1);
+            box-shadow: 0 4px 16px rgba(28,181,224,0.18);
+            transform: translateY(-2px) scale(1.03);
+        }
+        .gradio-tabs .tabitem, .gradio-tab {
+            transition: background 0.2s, color 0.2s;
+        }
+        .gradio-tabs .tabitem:hover, .gradio-tab:hover {
+            filter: brightness(1.08) contrast(1.1);
+            box-shadow: 0 2px 8px rgba(28,181,224,0.10);
+        }
+        /* Custom font for CSV preview (using Times New Roman) */
+        .csv-preview {
+            font-family: 'Times New Roman', serif;
+        }
+        """
+        with gr.Blocks(title="VoiceBot MATRIX - RAG QA System", css=custom_css) as demo:
             gr.Markdown("# Voice Bot MATRIX RAG QA System")
 
             with gr.Tab("Batch Process"):
@@ -86,37 +98,17 @@ def create_gradio_interface():
                         output_file = gr.File(label="Output CSV")
                         result_text = gr.Textbox(label="Results Summary", lines=6)
                 gr.Markdown("## CSV Preview (First 10 Rows)")
-                csv_preview = gr.Dataframe(headers=["Questions"], type="pandas", row_count=10, col_count=1, interactive=False)
+                csv_preview = gr.Dataframe(headers=["Questions"], type="pandas", row_count=10, col_count=1, interactive=False, elem_id="csv_preview", elem_classes=["csv-preview"])
 
-            with gr.Tab("Interactive QA"):
-                with gr.Row():
-                    with gr.Column():
-                        question_input = gr.Textbox(label="Enter your question", placeholder="Type your question here...")
-                        ask_btn = gr.Button("Get Answer")
-                    with gr.Column():
-                        answer_output = gr.Textbox(label="Answer", lines=10)
-
-            # Set up event handlers
+            # Set up event handler only for batch process
             process_btn.click(run_inference, inputs=[csv_input], outputs=[output_file, result_text, csv_preview])
-            ask_btn.click(process_single_question, inputs=[question_input], outputs=[answer_output])
 
         demo.launch(share=False)
 
     except Exception as e:
         print(f"Error starting Gradio interface: {e}")
         print("Falling back to command-line interface...")
-        while True:
-            try:
-                question = input("\nEnter your question (or 'exit' to quit): ")
-                if question.lower() in ['exit', 'quit']:
-                    break
-                answer = process_single_question(question)
-                print("\n" + answer)
-            except KeyboardInterrupt:
-                print("\nExiting...")
-                break
-            except Exception as e:
-                print(f"Error processing question: {e}")
+        # Optionally, you can remove the CLI fallback for single question as well, since interactive QA is being removed.
 
 if __name__ == '__main__':
     create_gradio_interface()

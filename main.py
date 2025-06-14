@@ -274,3 +274,151 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def create_gradio_interface(voicebot):
+    """Create and configure Gradio interface with improved connection handling"""
+    try:
+        def safe_process_audio(audio_path):
+            """Wrapper for safe audio processing with connection stability"""
+            try:
+                if audio_path is None:
+                    return "No audio input received.", "Please provide audio input to continue.", None, []
+                
+                # Process in smaller chunks to avoid Content-Length issues
+                result = voicebot.process_audio(audio_path)
+                if not result or len(result) != 4:
+                    return "Processing failed.", "An error occurred during processing.", None, []
+                
+                transcript, response, audio_out, history = result
+                
+                # Ensure we have valid outputs and they're not too large
+                if not transcript:
+                    transcript = "Transcription failed"
+                if not response:
+                    response = "Response generation failed"
+                if not isinstance(history, list):
+                    history = []
+                    
+                # Limit response size to avoid Content-Length issues
+                max_length = 10000  # Characters
+                if len(response) > max_length:
+                    response = response[:max_length] + "..."
+                
+                # Convert history to a smaller format
+                history = history[-5:]  # Keep only last 5 interactions
+                
+                return transcript, response, audio_out, history
+                    
+            except Exception as e:
+                print(f"Safe processing error: {e}")
+                return str(e), "An error occurred while processing your request.", None, []
+
+        # Create Gradio interface with connection stability settings
+        with gr.Blocks(
+            title="VoiceBot - AI Banking Assistant",
+            theme=gr.themes.Soft(),
+            css="""
+            .gradio-container {
+                max-width: 1200px !important;
+                margin: auto !important;
+            }
+            """,
+            # Add connection stability settings
+            analytics_enabled=False,
+            batch_size=1,
+            max_batch_size=1,
+            enable_queue=True,
+            max_size=100,  # Limit queue size
+        ) as demo:
+            
+            gr.Markdown(
+                """
+                # 🤖 VoiceBot - AI Banking Assistant
+                
+                🎙️ **Record or upload your banking question** - The bot will transcribe it, generate a helpful response, and speak it back to you.
+                
+                **Supported Languages:** English, Hindi, and Hinglish
+                """
+            )
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    audio_input = gr.Audio(
+                        label="🎙️ Record or Upload Your Question",
+                        sources=["microphone", "upload"],
+                        type="filepath",
+                        streaming=False,  # Disable streaming to avoid Content-Length issues
+                        show_download_button=False
+                    )
+                    
+                    transcript_box = gr.Textbox(
+                        label="📝 Transcript",
+                        placeholder="Your speech will be transcribed here...",
+                        lines=3,
+                        max_lines=5,
+                        show_copy_button=True
+                    )
+                    
+                    submit_btn = gr.Button(
+                        "🚀 Process Audio", 
+                        variant="primary",
+                        size="lg"
+                    )
+
+                with gr.Column(scale=1):
+                    output_text = gr.Textbox(
+                        label="🤖 Bot Response",
+                        placeholder="Response will appear here...",
+                        lines=6,
+                        max_lines=10,
+                        show_copy_button=True
+                    )
+                    
+                    audio_output = gr.Audio(
+                        label="🔊 Voice Response",
+                        type="filepath",
+                        streaming=False,  # Disable streaming
+                        autoplay=False,
+                        show_download_button=True
+                    )
+
+            with gr.Row():
+                conversation_history = gr.Dataframe(
+                    label="💬 Recent Conversations",
+                    headers=["Question", "Response"],
+                    wrap=True,
+                    interactive=False,
+                )
+
+            # Connect the interface with error handling
+            submit_btn.click(
+                fn=safe_process_audio,
+                inputs=[audio_input],
+                outputs=[transcript_box, output_text, audio_output, conversation_history],
+                show_progress=True,
+                api_name=None  # Disable API endpoint to avoid potential issues
+            )
+            
+            # Handle file upload with error handling
+            audio_input.change(
+                fn=safe_process_audio,
+                inputs=[audio_input],
+                outputs=[transcript_box, output_text, audio_output, conversation_history],
+                show_progress=True,
+                api_name=None  # Disable API endpoint
+            )
+
+        # Configure the demo with connection stability settings
+        demo.config.update({
+            "allow_flagging": False,
+            "allow_screenshot": False,
+            "show_api": False,
+            "server_port": int(os.environ.get("GRADIO_SERVER_PORT", 7860)),
+            "server_name": os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1")
+        })
+
+        return demo
+        
+    except Exception as e:
+        print(f"❌ Gradio interface setup failed: {e}")
+        raise
