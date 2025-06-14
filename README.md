@@ -28,6 +28,29 @@ A voice-enabled chatbot that matches user questions against a preloaded QA datas
      ```
      AWS_ACCESS_KEY_ID=your_access_key
      AWS_SECRET_ACCESS_KEY=your_secret_key
+     ```
+
+## Using the Gradio Interface
+
+The system now includes a Gradio web interface for easy interaction with the QA system.
+
+1. Start the interface:
+   ```bash
+   python run_inference.py
+   ```
+
+2. The interface provides two modes:
+   - **Batch Process**: Upload a CSV file with questions (must have a 'Questions' column)
+   - **Interactive QA**: Type individual questions and get immediate answers
+
+3. Sample CSV format (see `Data/test.csv` for an example):
+   ```
+   Questions
+   What are the typical documents required to open a new savings account?
+   How do I apply for a credit card?
+   ```
+
+4. The system will provide responses along with information about the source (dataset or LLM) and confidence level.
      AWS_SESSION_TOKEN=your_session_token  # Optional
      ```
 
