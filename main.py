@@ -12,12 +12,14 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 from modules.aws_asr import AWSTranscribeModule
 from modules.response_gen_rag import ResponseGeneratorRAG
+from modules.response_gen_ragb import ResponseGeneratorRAGB
+from modules.aws_tts import AWSTTSModule
+from modules.supabase_client import SupabaseManager
 import boto3
 from modules.utils import Config, get_aws_credentials, clean_text
 from langdetect import detect
 from indic_transliteration import sanscript
 from indic_transliteration.sanscript import transliterate
-from modules.aws_tts import AWSTTSModule
 import logging
 import time
 from functools import wraps
@@ -58,18 +60,55 @@ class VoiceBotUI:
             logger.info("Initializing VoiceBot components...")
             self.config = Config()
             
+            # Initialize user state
+            self.current_user = None
+            self.access_token = None
+            
+            # Initialize Supabase
+            try:
+                self.supabase = SupabaseManager()
+                logger.info("✅ Supabase client initialized")
+            except Exception as supabase_error:
+                logger.error(f"❌ Supabase initialization failed: {supabase_error}")
+                raise
+            
             # Initialize modules with error handling
             self._initialize_modules()
             
-            # Setup directories and CSV files
+            # Setup directories for audio files
             self._setup_directories()
-            self._initialize_csv_files()
             
             logger.info("✅ VoiceBot initialized successfully!")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize VoiceBot: {e}")
             raise
+
+    def sign_in_user(self, email: str, password: str) -> Tuple[bool, str]:
+        """Sign in a user and store their session"""
+        try:
+            response = self.supabase.sign_in(email, password)
+            if response and hasattr(response, 'session') and response.session:
+                self.current_user = response.user
+                self.access_token = response.session.access_token
+                return True, "Successfully logged in!"
+            return False, "Login failed - invalid credentials"
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            return False, f"Login failed: {str(e)}"
+
+    def sign_out_user(self) -> Tuple[bool, str]:
+        """Sign out the current user"""
+        try:
+            if self.current_user:
+                self.supabase.sign_out()
+                self.current_user = None
+                self.access_token = None
+                return True, "Successfully logged out!"
+            return False, "No user is currently logged in"
+        except Exception as e:
+            logger.error(f"Logout error: {str(e)}")
+            return False, f"Logout failed: {str(e)}"
 
     def _initialize_modules(self):
         """Initialize ASR, TTS, and RAG modules with error handling"""
@@ -92,19 +131,23 @@ class VoiceBotUI:
             if not os.path.exists(embeddings_file_path):
                 logger.warning(f"⚠️ Embeddings file not found: {embeddings_file_path}")
             
-            # Initialize RAG response generator
+            # Initialize both RAG implementations
             self.response_gen = ResponseGeneratorRAG(
                 faiss_index_path=faiss_index_path, 
                 embeddings_file_path=embeddings_file_path
             )
-            logger.info("✅ RAG response generator initialized")
+            self.response_gen_with_context = ResponseGeneratorRAGB(
+                faiss_index_path=faiss_index_path, 
+                embeddings_file_path=embeddings_file_path
+            )
+            logger.info("✅ RAG response generators initialized")
             
         except Exception as e:
             logger.error(f"❌ Module initialization failed: {e}")
             raise
 
     def _setup_directories(self):
-        """Create necessary directories"""
+        """Create necessary directories for audio files"""
         try:
             self.input_dir = Path("Data/userinputvoice")
             self.output_dir = Path("Data/voicebotoutput")
@@ -119,47 +162,6 @@ class VoiceBotUI:
             
         except Exception as e:
             logger.error(f"❌ Directory setup failed: {e}")
-            raise
-
-    def _initialize_csv_files(self):
-        """Initialize CSV files for data storage"""
-        try:
-            self.input_csv_path = self.input_dir / "user_inputs.csv"
-            self.output_csv_path = self.output_dir / "voice_responses.csv"
-            
-            # Define column structures
-            input_columns = ["Timestamp", "Question", "AudioFilePath", "Language", "Format"]
-            output_columns = ["Timestamp", "Question", "Response", "Source", "Confidence", "Language", "Format"]
-            
-            # Initialize input CSV
-            if not self.input_csv_path.exists():
-                pd.DataFrame(columns=input_columns).to_csv(self.input_csv_path, index=False)
-                logger.info("✅ Created new input CSV file")
-            
-            # Initialize output CSV
-            if not self.output_csv_path.exists():
-                pd.DataFrame(columns=output_columns).to_csv(self.output_csv_path, index=False)
-                logger.info("✅ Created new output CSV file")
-            
-            # Load existing data
-            try:
-                self.input_df = pd.read_csv(self.input_csv_path)
-                if self.input_df.empty:
-                    self.input_df = pd.DataFrame(columns=input_columns)
-            except (pd.errors.EmptyDataError, FileNotFoundError):
-                self.input_df = pd.DataFrame(columns=input_columns)
-                
-            try:
-                self.output_df = pd.read_csv(self.output_csv_path)
-                if self.output_df.empty:
-                    self.output_df = pd.DataFrame(columns=output_columns)
-            except (pd.errors.EmptyDataError, FileNotFoundError):
-                self.output_df = pd.DataFrame(columns=output_columns)
-            
-            logger.info("✅ CSV files initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ CSV initialization failed: {e}")
             raise
 
     def detect_language(self, text: str) -> str:
@@ -243,62 +245,67 @@ class VoiceBotUI:
             # Handle different audio input types
             try:
                 if isinstance(audio_path, tuple):
-                    # Handle (sample_rate, audio_data) tuple
                     sample_rate, audio_data = audio_path
                     self._save_audio(local_audio_path, audio_data, sample_rate)
                 else:
-                    # Handle file path
                     if not os.path.exists(audio_path):
                         logger.error(f"Audio file not found: {audio_path}")
                         return f"Error: Audio file not found at {audio_path}", "Audio file error.", None, []
                     
-                    # Read and save audio
                     audio_data, sample_rate = sf.read(audio_path)
                     self._save_audio(local_audio_path, audio_data, sample_rate)
                 
+                audio_path = str(local_audio_path)
             except Exception as audio_error:
-                logger.error(f"Audio handling error: {audio_error}")
-                return f"Error processing audio: {str(audio_error)}", "Audio processing failed.", None, []
+                logger.error(f"Audio processing error: {audio_error}")
+                return f"Audio processing error: {str(audio_error)}", "Failed to process audio.", None, []
 
-            # Transcribe audio using AWS Transcribe
+            # Speech recognition
             logger.info("Starting transcription...")
-            transcript = self.asr_module.transcribe_audio(str(local_audio_path))
+            transcript = self.asr_module.transcribe_audio(audio_path)
             
-            if not transcript or not transcript.strip():
-                logger.warning("Transcription failed or empty")
-                return "Failed to transcribe audio", "Could not understand the audio. Please try again.", None, []
+            if not transcript:
+                return "Transcription failed", "Failed to transcribe audio", None, []
             
-            logger.info(f"Transcription successful: {transcript[:50]}...")
-            
-            # Clean and analyze transcript
             clean_transcript = clean_text(transcript)
             detected_lang = self.detect_language(clean_transcript)
-            is_hinglish = self._is_hinglish(clean_transcript)
+            format_type = 'devanagari' if '\u0900' <= clean_transcript[0] <= '\u097F' else 'latin'
             
-            # Determine format
-            format_type = "Hinglish" if is_hinglish else ("Hindi" if detected_lang == 'hi' else "English")
+            logger.info(f"Transcription successful: {clean_transcript}")
             
-            # Save input to CSV
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            new_input = pd.DataFrame({
-                "Timestamp": [timestamp],
-                "Question": [clean_transcript],
-                "AudioFilePath": [str(local_audio_path)],
-                "Language": [detected_lang],
-                "Format": [format_type]
-            })
-            
-            # Safely update input DataFrame
-            try:
-                self.input_df = pd.concat([self.input_df, new_input], ignore_index=True)
-                self.input_df.to_csv(self.input_csv_path, index=False, encoding='utf-8-sig')
-                logger.info("✅ Input data saved to CSV")
-            except Exception as csv_error:
-                logger.warning(f"Failed to save input CSV: {csv_error}")
-            
-            # Get response from RAG system
-            logger.info("Generating response...")
-            response, source, confidence = self.response_gen.get_response(clean_transcript)
+            # Generate response based on authentication state
+            if self.current_user and self.access_token:
+                # Use contextual RAG with Supabase
+                try:
+                    # Get recent conversations for context
+                    recent = self.supabase.get_recent_conversations(
+                        self.current_user.id,
+                        self.access_token,
+                        limit=5
+                    )
+                    
+                    # Build context from recent conversations
+                    context = ""
+                    if recent:
+                        for conv in recent:
+                            context += f"User: {conv['message']}\nAssistant: {conv['response']}\n"
+                        context += f"User: {clean_transcript}\n"
+                    
+                    # Generate response with context using RAGB
+                    logger.info("Generating response with context...")
+                    response, source, confidence = self.response_gen_with_context.get_response(
+                        clean_transcript,
+                        context=context if context else None
+                    )
+                    
+                except Exception as context_error:
+                    logger.error(f"Failed to use contextual response: {context_error}")
+                    # Fallback to basic RAG
+                    response, source, confidence = self.response_gen.get_response(clean_transcript)
+            else:
+                # Use basic RAG without context
+                logger.info("Generating response without context...")
+                response, source, confidence = self.response_gen.get_response(clean_transcript)
             
             if not response:
                 response = "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
@@ -307,42 +314,43 @@ class VoiceBotUI:
             
             logger.info(f"Response generated: {response[:50]}... (confidence: {confidence:.1f}%)")
             
-            # Save output to CSV
-            new_output = pd.DataFrame({
-                "Timestamp": [timestamp],
-                "Question": [clean_transcript],
-                "Response": [response],
-                "Source": [source],
-                "Confidence": [confidence],
-                "Language": [detected_lang],
-                "Format": [format_type]
-            })
-            
-            # Safely update output DataFrame
-            try:
-                # Ensure all columns exist
-                for col in new_output.columns:
-                    if col not in self.output_df.columns:
-                        self.output_df[col] = pd.NA
-                
-                self.output_df = pd.concat([self.output_df, new_output], ignore_index=True)
-                self.output_df.to_csv(self.output_csv_path, index=False, encoding='utf-8-sig')
-                logger.info("✅ Output data saved to CSV")
-            except Exception as csv_error:
-                logger.warning(f"Failed to save output CSV: {csv_error}")
-            
             # Generate audio response
             logger.info("Generating audio response...")
             audio_response = self.text_to_speech(response, detected_lang)
             
-            # Create conversation history for display
+            # Store in Supabase if authenticated
             try:
-                recent_interactions = self.output_df[["Question", "Response"]].tail(5).values.tolist()
-            except:
+                if self.current_user and self.access_token:
+                    conversation = self.supabase.store_conversation(
+                        user_id=self.current_user.id,
+                        message=clean_transcript,
+                        response=response,
+                        audio_url=audio_path,
+                        response_audio_url=audio_response,
+                        language=detected_lang,
+                        confidence_score=confidence,
+                        format=format_type,
+                        source=source,
+                        access_token=self.access_token
+                    )
+                    logger.info("✅ Conversation stored in Supabase")
+                    
+                    # Get updated conversation history
+                    recent = self.supabase.get_recent_conversations(
+                        self.current_user.id,
+                        self.access_token,
+                        limit=5
+                    )
+                    recent_interactions = [[conv["message"], conv["response"]] for conv in recent]
+                else:
+                    # For non-authenticated users, just show current interaction
+                    recent_interactions = [[clean_transcript, response]]
+                    
+            except Exception as db_error:
+                logger.error(f"Failed to store conversation: {db_error}")
                 recent_interactions = [[clean_transcript, response]]
             
             logger.info("✅ Audio processing completed successfully")
-            
             return (
                 clean_transcript,    # Transcript
                 response,           # Text response
@@ -400,95 +408,105 @@ def create_gradio_interface(voicebot):
                     history = []
                     
                 return transcript, response, audio_out, history
-                    
+                
             except Exception as e:
-                logger.error(f"Safe processing error: {e}")
-                return str(e), "An error occurred while processing your request.", None, []
+                logger.error(f"Error in audio processing: {e}")
+                return str(e), "An error occurred", None, []
+                
+        def handle_login(email, password):
+            """Handle user login"""
+            success, message = voicebot.sign_in_user(email, password)
+            if success:
+                return message, True, gr.update(visible=False), gr.update(visible=True)
+            return message, False, gr.update(visible=True), gr.update(visible=False)
+            
+        def handle_logout():
+            """Handle user logout"""
+            success, message = voicebot.sign_out_user()
+            if success:
+                return message, gr.update(visible=True), gr.update(False)
+            return message, gr.update(visible=True), gr.update(False)
 
         # Create Gradio interface
-        with gr.Blocks(
-            title="VoiceBot - AI Banking Assistant",
-            theme=gr.themes.Soft(),
-            css="""
-            .gradio-container {
-                max-width: 1200px !important;
-                margin: auto !important;
-            }
-            """
-        ) as demo:
+        demo = gr.Blocks()
+        
+        with demo:
+            gr.Markdown("# 🎙️ Voice Bot Interface")
+            login_msg = gr.Textbox(label="Login Status", interactive=False)
             
-            gr.Markdown(
-                """
-                # 🤖 VoiceBot - AI Banking Assistant
-                
-                🎙️ **Record or upload your banking question** - The bot will transcribe it, generate a helpful response, and speak it back to you.
-                
-                **Supported Languages:** English, Hindi, and Hinglish
-                """
-            )
-
-            with gr.Row():
-                with gr.Column(scale=1):
-                    audio_input = gr.Audio(
-                        label="🎙️ Record or Upload Your Question",
-                        sources=["microphone", "upload"],
-                        type="filepath",
-                        show_download_button=False
-                    )
-                    
-                    transcript_box = gr.Textbox(
-                        label="📝 Transcript",
-                        placeholder="Your speech will be transcribed here...",
-                        lines=3,
-                        max_lines=5,
-                        show_copy_button=True
-                    )
-                    
-                    submit_btn = gr.Button(
-                        "🚀 Process Audio", 
-                        variant="primary",
-                        size="lg"
-                    )
-
-                with gr.Column(scale=1):
-                    output_text = gr.Textbox(
-                        label="🤖 Bot Response",
-                        placeholder="Response will appear here...",
-                        lines=6,
-                        max_lines=10,
-                        show_copy_button=True
-                    )
-                    
-                    audio_output = gr.Audio(
-                        label="🔊 Voice Response",
-                        type="filepath",
-                        autoplay=False,
-                        show_download_button=True
-                    )
-
-            with gr.Row():
-                conversation_history = gr.Dataframe(
-                    label="💬 Recent Conversations",
-                    headers=["Question", "Response"],
-                    wrap=True,
-                    height=300,
-                    interactive=False
+            # Login components
+            with gr.Row(visible=True) as login_row:
+                email = gr.Textbox(
+                    label="Email",
+                    placeholder="Enter your email"
                 )
+                password = gr.Textbox(
+                    label="Password",
+                    placeholder="Enter your password",
+                    type="password"
+                )
+                login_btn = gr.Button("Login")
+            
+            # Main interface (hidden until login)
+            with gr.Column(visible=False) as main_interface:
+                logout_btn = gr.Button("Logout")
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        audio_input = gr.Audio(
+                            label="🎤 Record or Upload Audio",
+                            type="filepath",
+                            sources=["microphone", "upload"]
+                        )
+                        submit_btn = gr.Button(
+                            "Submit",
+                            variant="primary"
+                        )
+                        transcript_box = gr.Textbox(
+                            label="🔤 Transcript",
+                            placeholder="Transcription will appear here...",
+                            show_copy_button=True
+                        )
 
-            # Connect the interface
-            submit_btn.click(
-                fn=safe_process_audio,
-                inputs=[audio_input],
-                outputs=[transcript_box, output_text, audio_output, conversation_history],
-                show_progress=True
+                    with gr.Column(scale=1):
+                        output_text = gr.Textbox(
+                            label="🤖 Bot Response",
+                            placeholder="Response will appear here...",
+                            show_copy_button=True
+                        )
+                        
+                        audio_output = gr.Audio(
+                            label="🔊 Voice Response",
+                            type="filepath",
+                            autoplay=False,
+                            show_download_button=True
+                        )
+
+                with gr.Row():                    
+                    conversation_history = gr.Dataframe(
+                        label="💬 Recent Conversations",
+                        headers=["Question", "Response"],
+                        wrap=True,
+                        interactive=False
+                    )                # Only process on submit button click
+                submit_btn.click(
+                    fn=safe_process_audio,
+                    inputs=[audio_input],
+                    outputs=[transcript_box, output_text, audio_output, conversation_history],
+                    show_progress=True
+                )
+            
+            # Connect login handlers
+            login_btn.click(
+                fn=handle_login,
+                inputs=[email, password],
+                outputs=[login_msg, gr.State(value=True), login_row, main_interface]
             )
             
-            # Auto-submit when audio is uploaded
-            audio_input.change(
-                fn=safe_process_audio,
-                inputs=[audio_input],
-                outputs=[transcript_box, output_text, audio_output, conversation_history],
-                show_progress=True
+            logout_btn.click(
+                fn=handle_logout,
+                inputs=[],
+                outputs=[login_msg, login_row, main_interface]
             )
 
         logger.info("✅ Gradio interface setup complete")

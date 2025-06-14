@@ -1,5 +1,5 @@
 import pandas as pd
-from modules.response_gen_rag import ResponseGeneratorRAG
+from VoiceBot_MATRIX_submission.modules.response_gen_ragb import ResponseGeneratorRAG
 
 # Test questions in both English and Hindi
 test_questions = [

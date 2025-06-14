@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import os
 import faiss
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List
 from langdetect import detect
 from botocore.exceptions import ClientError
 import random
@@ -31,7 +31,6 @@ class ResponseGeneratorRAG:
         self.semantic_similarity_threshold = self.config.get('response', {}).get('semantic_similarity_threshold', 0.50)
         self.use_llm_fallback = self.config.get('response', {}).get('use_llm_fallback', True)
         self.top_k_retrieval = self.config.get('rag', {}).get('top_k_retrieval', 3)
-        self.max_context_window = self.config.get('response', {}).get('max_context_window', 5)
 
         self.bedrock_client = None
         self.embedding_client = None
@@ -270,114 +269,3 @@ Enhanced Answer (be concise, limit to 50 words):
             final_source += " (transliterated and polished Hinglish)"
 
         return final_response_text, final_source, final_confidence
-
-    def get_response(self, question: str, context: Optional[str] = None) -> Tuple[str, str, float]:
-        """Generate a response using both conversation context and dataset matching."""
-        original_question_lang = self.detect_language(question)
-        processed_question = question
-
-        if original_question_lang != 'en':
-            translated_question = self._translate_text(question, original_question_lang, 'en')
-            if translated_question:
-                processed_question = translated_question
-
-        # Find matches from the dataset
-        top_k_matches = self.find_best_matches_faiss(processed_question)
-        best_dataset_response = top_k_matches[0][0] if top_k_matches else None
-        best_dataset_score = top_k_matches[0][1] if top_k_matches else 0.0
-
-        if best_dataset_response and best_dataset_score >= self.semantic_similarity_threshold:
-            if original_question_lang == 'hi':
-                # For Hindi questions, return dataset answer as-is
-                final_response_text = best_dataset_response
-                final_source = 'dataset (FAISS)'
-            else:
-                # For non-Hindi questions, enhance with context
-                context_enhanced_response = self.enhance_with_context(
-                    question=processed_question,
-                    dataset_answer=best_dataset_response,
-                    context=context
-                )
-                final_response_text = context_enhanced_response
-                final_source = 'dataset (FAISS + context)'
-            final_confidence = best_dataset_score
-        elif self.use_llm_fallback:
-            # Use conversation context and any relevant dataset matches
-            context_documents = [match[0] for match in top_k_matches if match[0]]
-            if context:
-                context_documents.insert(0, context)
-            
-            llm_response = self.get_llm_response(processed_question, context_documents)
-            if llm_response:
-                final_response_text = llm_response
-                final_source = 'llm (with context)' if context else 'llm (no context)'
-                final_confidence = 100.0
-            else:
-                final_response_text = (best_dataset_response or "I apologize, but I couldn't find a suitable response.")
-                final_source = 'dataset (low confidence)'
-                final_confidence = best_dataset_score
-        else:
-            final_response_text = (best_dataset_response or "I apologize, but I couldn't find a suitable response.")
-            final_source = 'dataset (low confidence)'
-            final_confidence = best_dataset_score
-
-        # Add conversation markers and handle translation
-        conversational_prefix = self._get_discourse_marker() + " "
-        final_response_text = conversational_prefix + final_response_text
-
-        if original_question_lang != 'en':
-            translated_response = self._translate_text(final_response_text, 'en', original_question_lang)
-            if translated_response:
-                final_response_text = translated_response
-                final_source = f"{final_source} (translated to {original_question_lang})"
-
-        if original_question_lang == 'hi' and self._is_hinglish(question):
-            hinglish_raw = transliterate(final_response_text, sanscript.DEVANAGARI, sanscript.ITRANS)
-            final_response_text = self.polish_hinglish(hinglish_raw)
-            final_source += " (transliterated and polished Hinglish)"
-
-        return final_response_text, final_source, final_confidence
-
-    def enhance_with_context(
-        self,
-        question: str,
-        dataset_answer: str,
-        context: Optional[str] = None
-    ) -> str:
-        """Enhance the response using conversation context and LLM."""
-        if not self.bedrock_client or not context:
-            return dataset_answer
-
-        try:
-            prompt = f"""You are a helpful, empathetic customer service assistant. Please provide a response to the user's question that takes into account both the suggested answer and the conversation history. Make the response personal and contextually relevant while maintaining a professional tone.
-
-Previous Conversation:
-{context}
-
-Current Question: {question}
-Suggested Answer: {dataset_answer}
-
-Please provide a contextually enhanced response (limit to 100 words):"""
-
-            response = self.bedrock_client.invoke_model(
-                modelId=CLAUDE_MODEL_ID,
-                body=json.dumps({
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 200,
-                    "temperature": 0.4,
-                })
-            )
-
-            response_body = json.loads(response['body'].read())
-            enhanced_text = ''
-            if response_body.get('content'):
-                for content_block in response_body['content']:
-                    if content_block.get('type') == 'text':
-                        enhanced_text = content_block['text']
-            
-            return enhanced_text.strip() if enhanced_text else dataset_answer
-
-        except Exception as e:
-            print(f"Warning: Could not enhance response with context: {e}")
-            return dataset_answer

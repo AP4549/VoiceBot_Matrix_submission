@@ -5,7 +5,7 @@ import time
 from typing import Optional, Tuple, Dict, List, Generator, Any
 from pathlib import Path
 from modules.utils import Config, clean_text
-from modules.response_gen_rag import ResponseGeneratorRAG
+from VoiceBot_MATRIX_submission.modules.response_gen_ragb import ResponseGeneratorRAG
 from langdetect import detect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 

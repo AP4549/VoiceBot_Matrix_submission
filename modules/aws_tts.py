@@ -14,14 +14,14 @@ class AWSTTSModule:
                 'LanguageCode': 'en-IN'
             },
             'hi': {
-                'VoiceId': 'Aditi',  # Hindi voice
-                'Engine': 'standard',  # Aditi only supports standard engine
+                'VoiceId': 'Kajal',  # Using Kajal for Hindi too as it handles both well
+                'Engine': 'neural',
                 'LanguageCode': 'hi-IN'
             },
             'hi-Latn': {  # For Hinglish (Hindi in Latin script)
                 'VoiceId': 'Kajal',  # Using Kajal for better Hinglish pronunciation
                 'Engine': 'neural',
-                'LanguageCode': 'en-IN'
+                'LanguageCode': 'hi-IN'
             }
         }
 
@@ -36,42 +36,42 @@ class AWSTTSModule:
         Returns: Path to the generated audio file
         """
         try:
-            # Handle Hinglish (Hindi in Latin script)
+            # Sanitize and prepare text
+            text = text.strip().replace('"', "'")
+            output_path = f"temp_speech_{hash(text)}.mp3"
+
+            # Handle Hinglish and Hindi
             if language == 'hi':
                 script = self.detect_script(text)
                 if script == 'Latn':
-                    # Use hi-Latn config for Hinglish
                     voice_config = self.voice_configs['hi-Latn']
                 else:
-                    # Use standard Hindi config for Devanagari
                     voice_config = self.voice_configs['hi']
             else:
-                # Default to English configuration
                 voice_config = self.voice_configs['en']
+
+            # Configure Polly request
+            polly_request = {
+                'Engine': voice_config['Engine'],
+                'LanguageCode': voice_config['LanguageCode'],
+                'OutputFormat': 'mp3',
+                'Text': text,
+                'TextType': 'text',  # Always use plain text to avoid SSML issues
+                'VoiceId': voice_config['VoiceId']
+            }
+
+            # Generate speech
+            response = self.polly_client.synthesize_speech(**polly_request)
             
-            # Add SSML for better pronunciation if needed
-            if language == 'hi' and self.detect_script(text) == 'Latn':
-                # Wrap Hinglish text in SSML to improve pronunciation
-                text = f'<speak><amazon:domain name="conversational">{text}</amazon:domain></speak>'
+            # Save audio
+            if "AudioStream" in response:
+                with open(output_path, 'wb') as file:
+                    file.write(response['AudioStream'].read())
+                return output_path
                 
-            response = self.polly_client.synthesize_speech(
-                Text=text,
-                TextType='ssml' if '<speak>' in text else 'text',
-                OutputFormat='mp3',
-                VoiceId=voice_config['VoiceId'],
-                Engine=voice_config['Engine'],
-                LanguageCode=voice_config['LanguageCode']
-            )
-            
-            if 'AudioStream' in response:
-                # Create a temporary file to store the audio
-                import tempfile
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as f:
-                    f.write(response['AudioStream'].read())
-                    return f.name
-                    
-            return None
-            
         except ClientError as e:
-            print(f"Error in text-to-speech: {str(e)}")
-            return None
+            print(f"AWS Polly error: {str(e)}")
+        except Exception as e:
+            print(f"Error in synthesize_speech: {str(e)}")
+        
+        return None
