@@ -52,17 +52,28 @@ def transcribe_audio(audio_path):
 
 # Example usage:
 # Make sure 'user_input.wav' is your recorded file from Step 1
-transcribed_text = transcribe_audio('Data/user_input_1.wav')
-print("Transcription:", transcribed_text)
+if __name__ == "__main__":
+    audio_file_path = 'Data/user_input_1.wav' # Path to the audio file for standalone testing
+    
+    # Ensure the Data directory exists for where the audio file should be
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_dir = os.path.join(project_root, "Data")
+    os.makedirs(data_dir, exist_ok=True)
+    
+    full_audio_path = os.path.join(project_root, audio_file_path)
 
-# Save to CSV under 'Questions' column
-csv_path = 'Data/transcriptions.csv'
-os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-if os.path.exists(csv_path):
-    df = pd.read_csv(csv_path)
-else:
-    df = pd.DataFrame(columns=['Questions'])
-new_row = pd.DataFrame({'Questions': [transcribed_text]})
-df = pd.concat([df, new_row], ignore_index=True)
-df.to_csv(csv_path, index=False)
-print(f"Saved transcription to {csv_path}")
+    if os.path.exists(full_audio_path):
+        transcribed_text = transcribe_audio(full_audio_path)
+        print("Transcription:", transcribed_text)
+
+        # If you still want to save to CSV when running ASR.py directly, uncomment these:
+        # transcriptions_file = save_transcription_to_csv(transcribed_text, os.path.join(project_root, "Data/transcriptions.csv"))
+        # print(f"Transcription saved to: {transcriptions_file}")
+
+        # If you still want to process responses when running ASR.py directly, uncomment these:
+        # responses_file = process_transcriptions_and_generate_responses(input_csv=transcriptions_file, output_csv=os.path.join(project_root, "Data/qa_responses.csv"))
+        # print(f"Processing complete. Responses saved to: {responses_file}")
+    else:
+        print(f"Error: Audio file not found at '{full_audio_path}'.")
+        print("Please ensure you have recorded audio or placed 'user_input_1.wav' in the 'Data' directory relative to your project root.")
+        print("When running the full VoiceBot MATRIX, the audio is recorded automatically.")
