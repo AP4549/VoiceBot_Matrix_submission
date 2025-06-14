@@ -2,6 +2,7 @@ region: us-west-2
 s3_bucket: voicebot-matrix-hackathon  # Replace with your bucket name
 qa_csv: data/qa_dataset.csv
 test_csv: data/test.csv
+transcriptions_csv: data/transcriptions.csv
 output_csv: output/output.csv
 
 # AWS Services Configuration

@@ -3,8 +3,7 @@ from modules.response_gen_rag import ResponseGeneratorRAG
 
 # Test questions in both English and Hindi
 test_questions = [
-    "What are the typical documents required to open a new savings account for a student?",
-    "ऑनलाइन बैंकिंग के माध्यम से मैं कौन-कौन सी सेवाएं उपयोग कर सकता हूँ?"
+    "What is the rate of interest for personal loan?",
 ]
 
 def test_qa_system():
