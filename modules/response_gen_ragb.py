@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import os
 import faiss
+import logging
 from typing import Optional, Tuple, List, Dict
 from langdetect import detect
 from botocore.exceptions import ClientError
@@ -11,10 +12,16 @@ import random
 from .utils import Config, load_qa_dataset
 from indic_transliteration import sanscript
 from indic_transliteration.sanscript import transliterate
+from .supabase_client import SupabaseManager
+from .vector_memory import VectorMemoryManager
+from .vector_memory import VectorMemoryManager
 
 EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 CLAUDE_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
 BEDROCK_REGION = "us-west-2"
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 class ResponseGeneratorRAGB:
     _discourse_markers = [
@@ -32,15 +39,31 @@ class ResponseGeneratorRAGB:
         self.use_llm_fallback = self.config.get('response', {}).get('use_llm_fallback', True)
         self.top_k_retrieval = self.config.get('rag', {}).get('top_k_retrieval', 3)
         self.max_context_window = self.config.get('response', {}).get('max_context_window', 5)
+        self.use_vector_memory = self.config.get('memory', {}).get('use_vector_memory', True)
 
         self.bedrock_client = None
         self.embedding_client = None
         self.translate_client = None
         self.faiss_index = None
         self.qa_embeddings_array = None
+        self.supabase = SupabaseManager()
 
         self._setup_aws_clients()
         self._load_faiss_artifacts(faiss_index_path, embeddings_file_path)
+        
+        # Initialize vector memory if enabled
+        if self.use_vector_memory and self.embedding_client:
+            try:
+                self.vector_memory = VectorMemoryManager(
+                    embedding_model_id=EMBEDDING_MODEL_ID,
+                    bedrock_client=self.embedding_client,
+                    index_path="Data/memory_index.faiss",
+                    metadata_path="Data/memory_metadata.json"
+                )
+                logger.info("Vector memory manager initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize vector memory: {e}")
+                self.use_vector_memory = False
 
     def _setup_aws_clients(self):
         try:
@@ -225,10 +248,27 @@ Enhanced Answer (be concise, limit to 50 words):
             # Add conversation context if available
             conversation_str = ""
             if conversation_context:
-                conversation_str = f"\n\nConversation History:\n{conversation_context}\n"
+                conversation_str = f"\n\nPREVIOUS CONVERSATION HISTORY (CRITICAL - YOU MUST REFERENCE THIS WHEN ANSWERING):\n{conversation_context}\n"
 
-            full_prompt = f"""You are a helpful, empathetic customer service assistant. Your primary goal is to answer the user's question in English (or in the original language if the question is not in English) in a sugar-coated, friendly, and empathetic tone. If the provided context documents are in a different language, translate them internally to English before answering. Answer the user's question ONLY using the provided context. If the context is insufficient, state that you cannot answer based on the provided information. (For example, instead of replying "bhai ek baat sun..." or "hum SBI ke employees hain..." in a harsh tone, sugar coat your reply so that it sounds empathetic and friendly.) In addition, please use respectful phrases (e.g. "bataiye", "boliye", "haan grahak ji") and avoid informal phrases (like "haa bhai"). {context_str}{conversation_str}Question: {question}\n\nResponse:"""
+            full_prompt = f"""You are a helpful, empathetic customer service assistant. Your primary goal is to answer the user's question in English (or in the original language if the question is not in English) in a professional, friendly, and empathetic tone. 
 
+IMPORTANT INSTRUCTIONS:
+1. You MUST reference relevant information from the conversation history when responding.
+2. If the user refers to something mentioned earlier, acknowledge it explicitly and provide continuity.
+3. Always maintain context awareness across multiple turns of conversation.
+4. If the provided context documents are in a different language, translate them internally to English before answering.
+5. Answer the user's question ONLY using the provided context and conversation history.
+6. If the context is insufficient, state that you cannot answer based on the provided information.
+7. Use respectful phrases (e.g. "bataiye", "boliye", "haan grahak ji") and avoid informal phrases (like "haa bhai").
+8. NEVER forget previous parts of the conversation. ALWAYS refer back to previous exchanges when relevant.
+9. If the user asks about something mentioned in a previous message, ALWAYS acknowledge that you remember it.
+10. PRIORITIZE maintaining conversation continuity over being overly friendly.
+
+{context_str}{conversation_str}Question: {question}\n\nResponse:"""
+
+            # Debug logging to verify context is being sent to LLM
+            logger.debug(f"LLM Prompt with Context:\n{full_prompt}")
+            
             messages = [{"role": "user", "content": full_prompt}]
             response = self.bedrock_client.invoke_model(
                 modelId=CLAUDE_MODEL_ID,
@@ -288,20 +328,64 @@ Enhanced Answer (be concise, limit to 50 words):
                     return response_body['completion']
                 elif 'choices' in response_body and len(response_body['choices']) > 0:
                     return response_body['choices'][0].get('message', {}).get('content', '')
-            
             raise ValueError("Unexpected response format from LLM")
             
         except Exception as e:
             print(f"Error getting LLM response: {e}")
             raise
-
-    def get_response(self, question: str, context: str = None) -> Tuple[str, str, float]:
+            
+    def get_conversation_context(self, user_id: str, query: str = None, access_token: str = None) -> str:
+        """Get conversations from memory storage and format them as context.
+        
+        This method uses vector-based retrieval when possible, falling back to recency-based
+        retrieval if vector memory is not available or the query is None.
+        """
+        try:
+            # Try using vector memory for semantic search if enabled and query is provided
+            if self.use_vector_memory and self.vector_memory and query:
+                logger.info(f"Using vector memory retrieval for user {user_id}")
+                
+                # Use hybrid retrieval (combining semantic and recency)
+                memories = self.vector_memory.hybrid_retrieve(
+                    query=query, 
+                    user_id=user_id,
+                    recent_limit=3,  # Get 3 recent conversations
+                    semantic_limit=3  # Get 3 semantically similar conversations
+                )
+                
+                if memories:
+                    # Format memories as context
+                    context = self.vector_memory.format_memories_as_context(memories)
+                    logger.info(f"Retrieved {len(memories)} memories using vector similarity")
+                    return context
+            
+            # Fall back to recency-based retrieval
+            logger.info(f"Using recency-based memory retrieval for user {user_id}")
+            
+            # Get last 6 conversations from Supabase
+            conversations = self.supabase.get_recent_conversations(
+                user_id=user_id,
+                access_token=access_token,
+                limit=6
+            )
+            
+            # Format conversations as context
+            context = "LONG-TERM CONVERSATION HISTORY (CRITICAL - YOU MUST REFERENCE THIS WHEN ANSWERING):\n"
+            for i, conv in enumerate(conversations):
+                context += f"Exchange {i+1}:\nHuman: {conv['message']}\nAssistant: {conv['response']}\n\n"
+            return context.strip()
+        except Exception as e:
+            logger.warning(f"Could not retrieve conversation history: {str(e)}")
+            return ""
+            
+    def get_response(self, question: str, context: str = None, chat_history: List[List[str]] = None, user_id: str = None, access_token: str = None) -> Tuple[str, str, float]:
         """
         Main method that combines all functionality from both files:
         - Language detection and translation
         - FAISS search with proper confidence scoring
         - Answer enhancement for non-Hindi questions
-        - Conversation context support
+        - Vector memory retrieval for semantically relevant conversation history
+        - Conversation context support from Supabase and in-memory chat history
         - Hinglish transliteration and polishing
         """
         try:
@@ -318,7 +402,58 @@ Enhanced Answer (be concise, limit to 50 words):
             # Step 2: Find best matches using FAISS
             top_k_matches = self.find_best_matches_faiss(processed_question)
             best_dataset_response = top_k_matches[0][0] if top_k_matches else None
-            best_dataset_score = top_k_matches[0][1] if top_k_matches else 0.0
+            best_dataset_score = top_k_matches[0][1] if top_k_matches else 0.0            # Step 2.5: Fetch semantically relevant conversation history if user_id provided
+            relevant_context = ""
+            if user_id and self.use_vector_memory and self.vector_memory:
+                try:
+                    # Get semantically relevant conversation history using vector memory
+                    relevant_context = self.get_conversation_context(
+                        user_id=user_id,
+                        query=processed_question,  # Use the processed question for semantic search
+                        access_token=access_token
+                    )
+                    logger.info("Retrieved semantically relevant conversation context")
+                except Exception as e:
+                    import traceback
+                    error_details = traceback.format_exc()
+                    logger.warning(f"Failed to get vector-based conversation context: {e}\n{error_details}")
+                    # Disable vector memory for this session if it fails
+                    self.use_vector_memory = False
+                    logger.warning("Vector memory has been disabled for this session due to errors")
+            
+            # Use provided context if no relevant context found
+            if not relevant_context and context:
+                relevant_context = context
+                
+            # Step 2.6: Add in-memory chat history to context if available
+            enhanced_context = relevant_context or ""
+            if chat_history and len(chat_history) > 0:
+                # Get the last 5 exchanges from chat history
+                recent_history = chat_history[-5:] if len(chat_history) > 5 else chat_history
+                history_context = "\n\nRECENT CONVERSATION HISTORY (CRITICAL - YOU MUST REFERENCE THIS WHEN ANSWERING):\n"
+                for i, exchange in enumerate(recent_history):
+                    if len(exchange) >= 2:  # Ensure we have both question and answer
+                        history_context += f"Exchange {i+1}:\nHuman: {exchange[0]}\nAssistant: {exchange[1]}\n\n"
+                enhanced_context = history_context + ("\n" + enhanced_context if enhanced_context else "")
+            # Step 2.7: Always include last 6 recency-based conversations for LLM context
+            if user_id:
+                try:
+                    recent_convs = self.supabase.get_recent_conversations(
+                        user_id=user_id,
+                        access_token=access_token,
+                        limit=6
+                    )
+                    recency_str = "\n\nPREVIOUS 6 CONVERSATIONS (RECENCY-BASED):\n"
+                    for i, conv in enumerate(recent_convs):
+                        recency_str += f"Exchange {i+1}: Human: {conv['message']}\nAssistant: {conv['response']}\n"
+                    enhanced_context += recency_str
+                except Exception as e:
+                    logger.warning(f"Could not fetch recent conversations for context: {e}")
+
+            # Debug logging to verify enhanced context construction
+            logger.debug(f"Enhanced Context for LLM:\n{enhanced_context}")
+            logger.debug(f"Chat History Length: {len(chat_history) if chat_history else 0}")
+            logger.debug(f"Relevant Context Length: {len(relevant_context) if relevant_context else 0}")
 
             # Step 3: Determine response strategy based on confidence and language
             final_response_text = ""
@@ -340,12 +475,17 @@ Enhanced Answer (be concise, limit to 50 words):
             elif self.use_llm_fallback:
                 # Use LLM with context documents and conversation history
                 context_documents = [match[0] for match in top_k_matches if match[0]]
-                llm_response = self.get_llm_response(processed_question, context_documents, context)
+                # Pass recency-enriched context into LLM
+                llm_response = self.get_llm_response(
+                    processed_question,
+                    context_documents,
+                    conversation_context=enhanced_context
+                )
                 
                 if llm_response:
                     final_response_text = llm_response
                     final_source = 'llm (augmented with FAISS)' if context_documents else 'llm (no context)'
-                    if context:
+                    if enhanced_context:
                         final_source += ' with conversation context'
                     final_confidence = 75.0  # Fixed confidence for LLM responses
                 else:
@@ -375,6 +515,13 @@ Enhanced Answer (be concise, limit to 50 words):
                 final_response_text = self.polish_hinglish(hinglish_raw)
                 final_source += " (transliterated and polished Hinglish)"
 
+            # Step 7: Store conversation in vector memory for deep contextual recall
+            if user_id and self.use_vector_memory and getattr(self, 'vector_memory', None):
+                try:
+                    self.vector_memory.store_memory(user_id, question, final_response_text)
+                    logger.debug(f"Stored memory for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to store memory: {e}")
             return final_response_text.strip(), final_source, final_confidence
             
         except Exception as e:

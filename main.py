@@ -64,6 +64,9 @@ class VoiceBotUI:
             self.current_user = None
             self.access_token = None
             
+            # Initialize chat history
+            self.chat_history = []
+            
             # Initialize Supabase
             try:
                 self.supabase = SupabaseManager()
@@ -228,100 +231,68 @@ class VoiceBotUI:
             logger.error(f"❌ Audio saving failed: {e}")
             raise
 
+    @retry_on_failure(max_retries=2)
+    def speech_to_text(self, audio_path):
+        """Convert speech to text using AWS Transcribe through ASR module"""
+        try:
+            logger.info(f"Converting speech to text from: {audio_path}")
+            transcript = self.asr_module.transcribe_audio(audio_path)
+            if transcript:
+                logger.info(f"Transcription successful: {transcript[:50]}...")
+                return transcript
+            else:
+                logger.warning("Transcription failed or returned empty result")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Speech-to-text conversion error: {e}")
+            return None    
     def process_audio(self, audio_path):
         """Process audio input and return (transcript, response, audio_response, history)"""
-        if audio_path is None:
-            logger.warning("No audio input received")
-            return "No audio input received", "Please provide audio input to continue.", None, []
-        
         try:
-            logger.info(f"Processing audio: {audio_path}")
-            
-            # Create unique filename
-            timestamp_str = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-            audio_filename = f"user_input_{timestamp_str}.wav"
-            local_audio_path = self.audio_dir / audio_filename
-            
-            # Handle different audio input types
-            try:
-                if isinstance(audio_path, tuple):
-                    sample_rate, audio_data = audio_path
-                    self._save_audio(local_audio_path, audio_data, sample_rate)
-                else:
-                    if not os.path.exists(audio_path):
-                        logger.error(f"Audio file not found: {audio_path}")
-                        return f"Error: Audio file not found at {audio_path}", "Audio file error.", None, []
-                    
-                    audio_data, sample_rate = sf.read(audio_path)
-                    self._save_audio(local_audio_path, audio_data, sample_rate)
-                
-                audio_path = str(local_audio_path)
-            except Exception as audio_error:
-                logger.error(f"Audio processing error: {audio_error}")
-                return f"Audio processing error: {str(audio_error)}", "Failed to process audio.", None, []
-
-            # Speech recognition
-            logger.info("Starting transcription...")
-            transcript = self.asr_module.transcribe_audio(audio_path)
-            
+            # Get transcript
+            transcript = self.speech_to_text(audio_path) or ""
             if not transcript:
-                return "Transcription failed", "Failed to transcribe audio", None, []
+                # No valid transcript
+                return "", "I couldn't understand the audio. Could you please try again?", None, []
+
+            clean_transcript = transcript.strip()
+            detected_lang = detect(clean_transcript) if clean_transcript else 'en'
             
-            clean_transcript = clean_text(transcript)
-            detected_lang = self.detect_language(clean_transcript)
-            format_type = 'devanagari' if '\u0900' <= clean_transcript[0] <= '\u097F' else 'latin'
+            # Get conversation context from Supabase for authenticated users
+            context = self.get_conversation_context()
             
-            logger.info(f"Transcription successful: {clean_transcript}")
+            # Log chat history before generating response
+            logger.info(f"Chat history before response generation: {self.chat_history}")
+            logger.info(f"Chat history length: {len(self.chat_history)}")
             
-            # Generate response based on authentication state
-            if self.current_user and self.access_token:
-                # Use contextual RAG with Supabase
-                try:
-                    # Get recent conversations for context
-                    recent = self.supabase.get_recent_conversations(
-                        self.current_user.id,
-                        self.access_token,
-                        limit=5
-                    )
-                    
-                    # Build context from recent conversations
-                    context = ""
-                    if recent:
-                        for conv in recent:
-                            context += f"User: {conv['message']}\nAssistant: {conv['response']}\n"
-                        context += f"User: {clean_transcript}\n"
-                    
-                    # Generate response with context using RAGB
-                    logger.info("Generating response with context...")
-                    response, source, confidence = self.response_gen_with_context.get_response(
-                        clean_transcript,
-                        context=context if context else None
-                    )
-                    
-                except Exception as context_error:
-                    logger.error(f"Failed to use contextual response: {context_error}")
-                    # Fallback to basic RAG
-                    response, source, confidence = self.response_gen.get_response(clean_transcript)
-            else:
-                # Use basic RAG without context
-                logger.info("Generating response without context...")
-                response, source, confidence = self.response_gen.get_response(clean_transcript)
+            # User ID for vector memory retrieval
+            user_id = self.current_user.id if self.current_user else None
+            
+            # Generate response with context, chat history, and user ID for vector memory
+            response, source, confidence = self.response_gen_with_context.get_response(
+                clean_transcript,
+                context=context,
+                chat_history=self.chat_history,
+                user_id=user_id,
+                access_token=self.access_token
+            )
             
             if not response:
                 response = "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
                 source = "fallback"
                 confidence = 0.0
             
-            logger.info(f"Response generated: {response[:50]}... (confidence: {confidence:.1f}%)")
-            
             # Generate audio response
-            logger.info("Generating audio response...")
             audio_response = self.text_to_speech(response, detected_lang)
+            # Ensure audio_response is a valid filepath or None (file must exist)
+            if not audio_response or not os.path.isfile(audio_response):
+                audio_response = None
             
-            # Store in Supabase if authenticated
-            try:
-                if self.current_user and self.access_token:
-                    conversation = self.supabase.store_conversation(
+            # Store conversation if authenticated
+            if self.current_user and self.access_token:
+                try:
+                    # Store conversation in Supabase
+                    self.supabase.store_conversation(
                         user_id=self.current_user.id,
                         message=clean_transcript,
                         response=response,
@@ -329,39 +300,52 @@ class VoiceBotUI:
                         response_audio_url=audio_response,
                         language=detected_lang,
                         confidence_score=confidence,
-                        format=format_type,
                         source=source,
                         access_token=self.access_token
                     )
-                    logger.info("✅ Conversation stored in Supabase")
                     
-                    # Get updated conversation history
-                    recent = self.supabase.get_recent_conversations(
-                        self.current_user.id,
-                        self.access_token,
-                        limit=5
-                    )
-                    recent_interactions = [[conv["message"], conv["response"]] for conv in recent]
-                else:
-                    # For non-authenticated users, just show current interaction
-                    recent_interactions = [[clean_transcript, response]]
+                    # Store in vector memory if available
+                    if hasattr(self.response_gen_with_context, 'vector_memory') and self.response_gen_with_context.vector_memory:
+                        # Get embedding for the combined text
+                        combined_text = f"Human: {clean_transcript}\nAssistant: {response}"
+                        
+                        try:
+                            # Store in vector memory for semantic retrieval
+                            success = self.response_gen_with_context.vector_memory.store_memory(
+                                user_id=self.current_user.id,
+                                message=clean_transcript,
+                                response=response,
+                                importance=1.0,  # Default importance
+                                metadata={
+                                    "language": detected_lang,
+                                    "confidence": confidence,
+                                    "source": source
+                                }
+                            )
+                            if success:
+                                logger.info("Successfully stored conversation in vector memory")
+                            else:
+                                logger.warning("Failed to store conversation in vector memory")
+                        except Exception as vm_error:
+                            logger.warning(f"Vector memory storage error: {vm_error}")
                     
-            except Exception as db_error:
-                logger.error(f"Failed to store conversation: {db_error}")
-                recent_interactions = [[clean_transcript, response]]
+                except Exception as e:
+                    logger.warning(f"Failed to store conversation: {str(e)}")
             
-            logger.info("✅ Audio processing completed successfully")
-            return (
-                clean_transcript,    # Transcript
-                response,           # Text response
-                audio_response,     # Audio response
-                recent_interactions # Conversation history
-            )
+            # Update in-memory chat history
+            self.chat_history.append([clean_transcript, response])
             
+            # Log chat history after updating
+            logger.info(f"Chat history after update: {self.chat_history}")
+            logger.info(f"Updated chat history length: {len(self.chat_history)}")
+            
+            # Return results
+            return transcript, response, audio_response, self.chat_history
         except Exception as e:
             logger.error(f"❌ Audio processing error: {e}")
             error_msg = f"Processing error: {str(e)}"
-            return error_msg, "An error occurred while processing your request.", None, []
+            # Return safe defaults
+            return "", "An error occurred while processing your request.", None, []
 
     @retry_on_failure(max_retries=2)
     def text_to_speech(self, text: str, language: str = 'en') -> Optional[str]:
@@ -382,138 +366,282 @@ class VoiceBotUI:
             logger.error(f"❌ TTS conversion failed: {e}")
             return None
 
+    def get_conversation_context(self) -> str:
+        """Get conversation context from Supabase for the current user."""
+        if self.current_user and self.access_token:
+            try:
+                context = self.response_gen_with_context.get_conversation_context(
+                    user_id=self.current_user.id,
+                    access_token=self.access_token
+                )
+                return context
+            except Exception as e:
+                logger.warning(f"Failed to get Supabase conversation context: {str(e)}")
+        return ""
+
+    def process_text_input(self, text_input: str, chat_history: List[List[str]]) -> str:
+        """Process text input from the chat interface and return (response)"""
+        try:
+            # Clean input and detect language
+            clean_text_input = text_input.strip()
+            detected_lang = detect(clean_text_input) if clean_text_input else 'en'
+            
+            # Fallback: if user asks about previous question/topic
+            lower = clean_text_input.lower()
+            if any(kw in lower for kw in ["previous question", "my previous question", "what was my previous question", "what topic"]):
+                if self.chat_history:
+                    last_q = self.chat_history[-1][0]
+                    return f"Your previous question was: '{last_q}'"
+                else:
+                    return "I don't have any previous question recorded."
+            
+            # Get conversation context from Supabase
+            context = self.get_conversation_context()
+            
+            # Generate response with context and chat history
+            response, source, confidence = self.response_gen_with_context.get_response(
+                clean_text_input,
+                context=context,
+                chat_history=chat_history
+            )
+            
+            if not response:
+                response = "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
+                source = "fallback"
+                confidence = 0.0
+            
+            # Store conversation if authenticated
+            if self.current_user and self.access_token:
+                try:
+                    self.supabase.store_conversation(
+                        user_id=self.current_user.id,
+                        message=clean_text_input,
+                        response=response,
+                        language=detected_lang,
+                        confidence_score=confidence,
+                        source=source,
+                        access_token=self.access_token
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to store conversation: {str(e)}")
+            
+            # Update in-memory chat history
+            self.chat_history.append([clean_text_input, response])
+            
+            return response
+        except Exception as e:
+            logger.error(f"❌ Text processing error: {e}")
+            return f"Processing error: {str(e)}"
+
+    def check_chat_history(self):
+        """Check and log the current chat history"""
+        try:
+            history_length = len(self.chat_history)
+            logger.info(f"Current chat history length: {history_length}")
+            logger.info(f"Chat history contents: {self.chat_history}")
+            
+            history_summary = ""
+            if history_length == 0:
+                history_summary = "Chat history is empty. No previous conversations found."
+            else:
+                history_summary = f"Chat history contains {history_length} exchanges:\n"
+                for i, exchange in enumerate(self.chat_history):
+                    if len(exchange) >= 2:
+                        history_summary += f"Exchange {i+1}:\nUser: {exchange[0]}\nAssistant: {exchange[1]}\n\n"
+            
+            return history_summary
+        except Exception as e:
+            logger.error(f"Failed to check chat history: {e}")
+            return f"Error checking chat history: {str(e)}"
+
+    def reset_chat_history(self):
+        """Reset the in-memory chat history"""
+        try:
+            previous_length = len(self.chat_history)
+            self.chat_history = []
+            logger.info(f"Chat history reset. Previous length: {previous_length}")
+            return True, "Chat history has been reset."
+        except Exception as e:
+            logger.error(f"Failed to reset chat history: {e}")
+            return False, f"Failed to reset chat history: {str(e)}"
+
 def create_gradio_interface(voicebot):
     """Create and configure Gradio interface"""
     try:
-        logger.info("Setting up Gradio interface...")
-        
-        def safe_process_audio(audio_path):
-            """Wrapper for safe audio processing"""
-            try:
-                if audio_path is None:
-                    return "No audio input received.", "Please provide audio input to continue.", None, []
-                
-                result = voicebot.process_audio(audio_path)
-                if not result or len(result) != 4:
-                    return "Processing failed.", "An error occurred during processing.", None, []
-                
-                transcript, response, audio_out, history = result
-                
-                # Ensure we have valid outputs
-                if not transcript:
-                    transcript = "Transcription failed"
-                if not response:
-                    response = "Response generation failed"
-                if not isinstance(history, list):
-                    history = []
-                    
-                return transcript, response, audio_out, history
-                
-            except Exception as e:
-                logger.error(f"Error in audio processing: {e}")
-                return str(e), "An error occurred", None, []
-                
-        def handle_login(email, password):
-            """Handle user login"""
-            success, message = voicebot.sign_in_user(email, password)
-            if success:
-                return message, True, gr.update(visible=False), gr.update(visible=True)
-            return message, False, gr.update(visible=True), gr.update(visible=False)
+        # Custom CSS
+        css = """
+        .gradio-container {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .tab-nav {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+        .small-btn button {
+            width: 34px;
+            height: 34px;
+            padding: 0;
+            font-size: 1rem;
+            margin-right: 4px;
+            border-radius: 4px;
+        }
+        """
+        # Define enhanced theme
+        theme = gr.themes.Soft(
+            primary_hue="emerald",
+            secondary_hue="blue",
+            neutral_hue="slate",
+            spacing_size="lg",
+            radius_size="md"
+        ).set(
+            body_background_fill="linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+            panel_background_fill="rgba(255, 255, 255, 0.95)"
+        )
+        # Create blocks interface with custom CSS
+        with gr.Blocks(title="Voice Assistant", theme=theme, css=css) as interface:
+            gr.Markdown("# 🎙️ Voice Assistant")
             
-        def handle_logout():
-            """Handle user logout"""
-            success, message = voicebot.sign_out_user()
-            if success:
-                return message, gr.update(visible=True), gr.update(False)
-            return message, gr.update(visible=True), gr.update(False)
-
-        # Create Gradio interface
-        demo = gr.Blocks()
-        
-        with demo:
-            gr.Markdown("# 🎙️ Voice Bot Interface")
-            login_msg = gr.Textbox(label="Login Status", interactive=False)
+            # Authentication section
+            with gr.Tab("Authentication"):
+                gr.Markdown("## 🔐 User Authentication")
+                with gr.Row():
+                    email_input = gr.Textbox(label="Email")
+                    password_input = gr.Textbox(label="Password", type="password")
+                with gr.Row():
+                    login_button = gr.Button("Sign In")
+                    logout_button = gr.Button("Sign Out")
+                auth_status = gr.Textbox(label="Authentication Status", interactive=False)
+                # Hidden flag to track login success
+                auth_flag = gr.Textbox(visible=False)
             
-            # Login components
-            with gr.Row(visible=True) as login_row:
-                email = gr.Textbox(
-                    label="Email",
-                    placeholder="Enter your email"
-                )
-                password = gr.Textbox(
-                    label="Password",
-                    placeholder="Enter your password",
-                    type="password"
-                )
-                login_btn = gr.Button("Login")
-            
-            # Main interface (hidden until login)
-            with gr.Column(visible=False) as main_interface:
-                logout_btn = gr.Button("Logout")
-                
+            # Voice Assistant tab, hidden until login
+            with gr.Tab("Voice Assistant", visible=False) as voice_tab:
+                gr.Markdown("## 🗣️ Voice Interaction")
                 with gr.Row():
                     with gr.Column(scale=1):
-                        audio_input = gr.Audio(
-                            label="🎤 Record or Upload Audio",
-                            type="filepath",
-                            sources=["microphone", "upload"]
-                        )
-                        submit_btn = gr.Button(
-                            "Submit",
-                            variant="primary"
-                        )
-                        transcript_box = gr.Textbox(
-                            label="🔤 Transcript",
-                            placeholder="Transcription will appear here...",
-                            show_copy_button=True
-                        )
-
-                    with gr.Column(scale=1):
-                        output_text = gr.Textbox(
-                            label="🤖 Bot Response",
-                            placeholder="Response will appear here...",
-                            show_copy_button=True
-                        )
-                        
-                        audio_output = gr.Audio(
-                            label="🔊 Voice Response",
-                            type="filepath",
-                            autoplay=False,
-                            show_download_button=True
-                        )
-
-                with gr.Row():                    
-                    conversation_history = gr.Dataframe(
-                        label="💬 Recent Conversations",
-                        headers=["Question", "Response"],
-                        wrap=True,
-                        interactive=False
-                    )                # Only process on submit button click
-                submit_btn.click(
-                    fn=safe_process_audio,
+                        # Audio input and settings
+                        audio_input = gr.Audio(type="filepath", label="Speak or Upload",
+                                               sources=["microphone", "upload"])
+                        file_upload = gr.File(label="Or upload audio file", file_types=[".wav", ".mp3"])
+                        # Actions
+                        process_btn = gr.Button("Process Audio")
+                        # Reset and Check buttons removed, to be added as icons near chat history
+                    with gr.Column(scale=2):
+                        transcript_output = gr.Textbox(label="Transcript")
+                        response_output = gr.Textbox(label="Response")
+                        audio_output = gr.Audio(label="Voice Response")
+                        chat_history_output = gr.Dataframe(
+                             headers=["User", "Assistant"],
+                             datatype=["str", "str"],
+                             label="Chat History"
+                         )
+                        with gr.Row():
+                            reset_btn_small = gr.Button("↺", elem_classes="small-btn")
+                            history_btn_small = gr.Button("📜", elem_classes="small-btn")
+                # Connect voice processing callbacks with built-in progress indicator
+                process_btn.click(
+                    fn=voicebot.process_audio,
                     inputs=[audio_input],
-                    outputs=[transcript_box, output_text, audio_output, conversation_history],
+                    outputs=[transcript_output, response_output, audio_output, chat_history_output],
                     show_progress=True
                 )
+                file_upload.change(
+                    fn=voicebot.process_audio,
+                    inputs=[file_upload],
+                    outputs=[transcript_output, response_output, audio_output, chat_history_output],
+                    show_progress=True
+                )
+                # Connect minimal buttons
+                reset_btn_small.click(fn=voicebot.reset_chat_history, inputs=[], outputs=[auth_status])
+                history_btn_small.click(fn=voicebot.check_chat_history, inputs=[], outputs=[auth_status])
+        
+            # Chat Inference tab, hidden until login
+            with gr.Tab("Chat Inference", visible=False) as chat_tab:
+                gr.Markdown("## 💬 Text Chat Inference")
+                chatbot = gr.Chatbot(label="Conversation")
+                msg = gr.Textbox(show_label=False, placeholder="Type your message here and hit Send")
+                send_btn = gr.Button("Send")
+                # Define respond function to update chatbot
+                def respond_text(message, history):
+                    if not message:
+                        return history, ""
+                    # Use text processing to get response
+                    response = voicebot.process_text_input(message, history)
+                    history = history + [[message, response]]
+                    return history, ""
+                # Wire up send button
+                send_btn.click(
+                    fn=respond_text,
+                    inputs=[msg, chatbot],
+                    outputs=[chatbot, msg]
+                )
             
-            # Connect login handlers
-            login_btn.click(
-                fn=handle_login,
-                inputs=[email, password],
-                outputs=[login_msg, gr.State(value=True), login_row, main_interface]
+            # Connect authentication buttons
+            login_button.click(
+                fn=voicebot.sign_in_user,
+                inputs=[email_input, password_input],
+                outputs=[auth_status]
             )
             
-            logout_btn.click(
-                fn=handle_logout,
+            logout_button.click(
+                fn=voicebot.sign_out_user,
                 inputs=[],
-                outputs=[login_msg, login_row, main_interface]
+                outputs=[auth_status]
             )
-
-        logger.info("✅ Gradio interface setup complete")
-        return demo
+            
+            # Hook login/logout to auth_flag and tab visibility
+            login_button.click(fn=voicebot.sign_in_user, inputs=[email_input, password_input], outputs=[auth_flag, auth_status])
+            login_button.click(
+                fn=lambda flag: (gr.update(visible=flag), gr.update(visible=flag)),
+                inputs=[auth_flag], outputs=[voice_tab, chat_tab]
+            )
+            logout_button.click(fn=voicebot.sign_out_user, inputs=[], outputs=[auth_status])
+            logout_button.click(
+                fn=lambda _: (gr.update(visible=False), gr.update(visible=False)),
+                inputs=[auth_status], outputs=[voice_tab, chat_tab]
+            )
+            
+            # Connect reset history button
+            reset_btn_small.click(
+                fn=voicebot.reset_chat_history,
+                inputs=[],
+                outputs=[auth_status]
+            )
+            
+            # Connect check history button
+            history_btn_small.click(
+                fn=voicebot.check_chat_history,
+                inputs=[],
+                outputs=[auth_status]
+            )
+            
+            # Auto-process when audio is recorded
+            audio_input.stop_recording(
+                fn=voicebot.process_audio,
+                inputs=[audio_input],
+                outputs=[transcript_output, response_output, audio_output, chat_history_output]
+            )
+        
+            # About section
+            with gr.Tab("About"):
+                gr.Markdown("""
+                ## About Voice Assistant
+                
+                This voice assistant uses AWS services for speech recognition and synthesis, 
+                combined with a RAG (Retrieval Augmented Generation) system for intelligent responses.
+                
+                ### Features:
+                - Speech-to-text using AWS Transcribe
+                - Text-to-speech using AWS Polly
+                - Intelligent responses using RAG and LLM
+                - Multi-language support
+                - User authentication and conversation history
+                """)
+        
+        return interface
         
     except Exception as e:
-        logger.error(f"❌ Gradio interface setup failed: {e}")
+        logger.error(f"Failed to create Gradio interface: {e}")
         raise
 
 def main():
@@ -526,6 +654,8 @@ def main():
         
         # Create Gradio interface
         demo = create_gradio_interface(voicebot)
+        # Enable request queue for chat inference and audio processing
+        demo.queue()
         
         # Launch with optimized settings
         logger.info("🌐 Launching Gradio interface...")

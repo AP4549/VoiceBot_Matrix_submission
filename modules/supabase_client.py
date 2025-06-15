@@ -193,3 +193,129 @@ class SupabaseManager:
         except Exception as e:
             logger.error(f"Error getting session: {str(e)}")
             return None
+        
+    def store_conversation_with_embedding(
+        self,
+        user_id: str,
+        message: str,
+        response: str,
+        embedding: list,
+        metadata: dict = None,
+        audio_url: str = None,
+        response_audio_url: str = None,
+        language: str = None,
+        confidence_score: float = None,
+        format: str = None,
+        source: str = None,
+        access_token: str = None
+    ) -> Dict:
+        """Store a conversation with embedding vector in the database."""
+        try:
+            # First sign in if needed
+            if not access_token:
+                try:
+                    auth_response = self.client.auth.sign_in_with_password({
+                        "email": "poker.ap4549@gmail.com",
+                        "password": "VoiceBot@2025!"
+                    })
+                    if auth_response and auth_response.session:
+                        access_token = auth_response.session.access_token
+                    else:
+                        raise ValueError("Could not get access token")
+                except Exception as auth_error:
+                    logger.error(f"Authentication failed: {str(auth_error)}")
+                    raise
+            
+            # Set up the request with auth
+            # Combine message and response for better semantic retrieval
+            combined_text = f"Human: {message}\nAssistant: {response}"
+            
+            data = {
+                "user_id": user_id,
+                "message": message,
+                "response": response,
+                "combined_text": combined_text,
+                "embedding": embedding,
+                "metadata": metadata or {},
+                "audio_url": audio_url,
+                "response_audio_url": response_audio_url,
+                "language": language,
+                "confidence_score": confidence_score,
+                "format": format,
+                "source": source
+            }
+            
+            logger.info(f"Storing conversation with embedding for user {user_id}")
+              
+            try:
+                # Use the 'conversation_embeddings' table instead of 'conversations'
+                result = self.client.table('conversation_embeddings').insert(data).execute()
+                logger.info("Conversation with embedding stored successfully")
+                return result.data[0] if result.data else None
+            except Exception as e:
+                logger.error(f"Error with first attempt: {str(e)}")
+                
+                # If that fails, try with a fresh client
+                auth_client = create_client(
+                    self.supabase_url,
+                    self.supabase_key,
+                )
+                auth_client.postgrest.auth(access_token)
+                
+                logger.info("Making authenticated request to insert conversation with embedding")
+                result = auth_client.table('conversation_embeddings').insert(data).execute()
+                logger.info("Conversation with embedding stored successfully")
+                return result.data[0] if result.data else None
+            
+        except Exception as e:
+            logger.error(f"Error storing conversation with embedding: {str(e)}")
+            if hasattr(e, 'message'):
+                logger.error(f"Error message: {e.message}")
+            if hasattr(e, 'response'):
+                logger.error(f"Error response: {e.response}")
+            raise
+            
+    def get_relevant_conversations(
+        self,
+        user_id: str,
+        query_embedding: list,
+        match_threshold: float = 0.6,
+        match_count: int = 5,
+        access_token: str = None
+    ) -> List[Dict]:
+        """Get semantically relevant conversations using vector similarity."""
+        try:
+            logger.info(f"Fetching relevant conversations for user {user_id}")
+            
+            # Create a fresh client with auth if token provided
+            if access_token:
+                auth_client = create_client(
+                    self.supabase_url,
+                    self.supabase_key,
+                )
+                auth_client.postgrest.auth(access_token)
+                query = auth_client
+            else:
+                query = self.client
+                
+            # Use RPC function to find similar conversations
+            # This assumes you've set up a similarity search function in Supabase
+            result = query.rpc(
+                'match_conversations', 
+                {
+                    'query_embedding': query_embedding,
+                    'match_threshold': match_threshold,
+                    'match_count': match_count,
+                    'p_user_id': user_id
+                }
+            ).execute()
+
+            conversations = result.data if result and hasattr(result, 'data') else []
+            logger.info(f"Found {len(conversations)} relevant conversations")
+            return conversations
+
+        except Exception as e:
+            logger.error(f"Error fetching relevant conversations: {str(e)}")
+            if hasattr(e, 'message'):
+                logger.error(f"Error message: {e.message}")
+            return []

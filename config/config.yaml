@@ -27,3 +27,19 @@ llm:
 response:
   fuzzy_match_threshold: 80  # minimum score for fuzzy matching
   use_llm_fallback: true     # whether to use LLM when no good match found
+  max_context_window: 5      # maximum number of conversation turns to include in context
+  semantic_similarity_threshold: 0.50  # threshold for semantic similarity matching
+
+# Memory Configuration
+memory:
+  use_vector_memory: False  # disable vector-based memory (using recency only)
+  relevance_threshold: 0.65  # minimum similarity score for vector memory matches
+  recent_limit: 3            # number of recent conversations to include in context
+  semantic_limit: 3          # number of semantically relevant conversations to include
+  memory_weight: 0.4         # weight for memory relevance in ranking (0-1)
+  recency_weight: 0.4        # weight for recency in ranking (0-1)
+  importance_weight: 0.2     # weight for importance in ranking (0-1)
+
+# RAG Configuration  
+rag:
+  top_k_retrieval: 3         # number of top matches to retrieve from FAISS
