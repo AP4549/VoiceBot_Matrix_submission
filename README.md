@@ -1,142 +1,237 @@
-# Matrix VoiceBot Submission
+# 🧠 Matrix VoiceBot
 
-A voice-enabled chatbot that matches user questions against a preloaded QA dataset and optionally uses AWS Bedrock for fallback responses.
+> 🔊 A multilingual, memory-augmented voice assistant powered by AWS and Supabase – for seamless Q&A from CSVs or your voice.
 
-## Features
+---
 
-- **Round 1: CSV-Based QA Matching**
-  - Fuzzy matching against QA dataset
-  - Optional AWS Bedrock fallback
-  - Batch processing via `test.csv`
+## 📌 Overview
 
-- **Round 2: Live Voice Demo**
-  - Real-time audio input via microphone
-  - File upload support
-  - AWS Transcribe for speech-to-text
-  - AWS Polly for text-to-speech responses
-  - Interactive Gradio web interface
+**Matrix VoiceBot** is a voice-enabled chatbot that semantically matches user questions against a preloaded QA dataset and optionally uses AWS Bedrock for fallback LLM responses. It supports:
 
-## Setup
+- ✅ **Batch CSV QA inference**
+- 🎤 **Live interactive voice assistant** (Gradio-based)
+- 🧠 **Memory-augmented responses with vector memory**
+- 🔐 **User auth and chat logging via Supabase**
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+Built with AWS Transcribe (STT), Polly (TTS), Bedrock (LLM), FAISS for semantic search, and a modern Python + Gradio stack.
 
-2. Configure AWS credentials:
-   - Create a `.env` file:
-     ```
-     AWS_ACCESS_KEY_ID=your_access_key
-     AWS_SECRET_ACCESS_KEY=your_secret_key
-     ```
+---
 
-## Using the Gradio Interface
+## 🔧 Features
 
-The system now includes a Gradio web interface for easy interaction with the QA system.
+### 🔁 Batch QA Inference (`run_inference.py`)
+- Upload a CSV file with a `Questions` column
+- Semantic search over `Data/qa_dataset.csv` using FAISS + Sentence Transformers
+- Optional fallback to AWS Bedrock (Titan Embeddings + Claude LLM)
+- Output includes:
+  - Matched response
+  - Confidence score
+  - Source: `Dataset` / `LLM`
 
-1. Start the interface:
-   ```bash
-   python run_inference.py
-   ```
+### 🎙️ Interactive Voice Assistant (`main.py`)
+- Real-time mic input and audio file upload
+- **Speech-to-Text**: AWS Transcribe  
+- **Text-to-Speech**: AWS Polly  
+- Gradio-based voice chat interface with:
+  - `response_gen_rag.py`: Vanilla FAISS + polishing
+  - `response_gen_ragb.py`: Hinglish + vector memory for deep context
 
-2. The interface provides two modes:
-   - **Batch Process**: Upload a CSV file with questions (must have a 'Questions' column)
-   - **Interactive QA**: Type individual questions and get immediate answers
+### 🔐 Supabase Integration
+- Signup/login with `create_test_user.py`
+- Persistent conversation storage via `modules/supabase_client.py`
+- Environment-driven user ID management
 
-3. Sample CSV format (see `Data/test.csv` for an example):
-   ```
-   Questions
-   What are the typical documents required to open a new savings account?
-   How do I apply for a credit card?
-   ```
+### 🧪 Testing
+- `Test/test_qa.py`: End-to-end QA pipeline
+- `Test/test_signup.py`: Supabase auth and storage tests
 
-4. The system will provide responses along with information about the source (dataset or LLM) and confidence level.
-     AWS_SESSION_TOKEN=your_session_token  # Optional
-     ```
+---
 
-3. Update configuration:
-   - Edit `config/config.yaml` with your settings:
-     - AWS region
-     - S3 bucket name
-     - Model preferences
-     - Matching thresholds
+## ⚙️ Installation
 
-## Data Structure
+### 📥 Prerequisites
 
-1. QA Dataset (`data/qa_dataset.csv`):
-   ```csv
-   Question,Response
-   "What are your hours?","We are open 9 AM to 5 PM Monday through Friday."
-   ```
+- Python 3.8+
+- AWS account with:
+  - Bedrock
+  - Transcribe
+  - Polly
+  - S3
+- Supabase project with:
+  - Supabase URL
+  - Anon key
 
-2. Test Input (`data/test.csv`):
-   ```csv
-   Questions
-   "When do you open?"
-   ```
+### 💻 Setup
 
-## Usage
+```bash
+git clone <repository-url>
+cd MatrixVoiceBot
+pip install -r requirements.txt
+```
 
-### Round 1: CSV Processing
+---
+
+## 🔐 Environment Variables
+
+Create a `.env` file at the project root:
+
+```ini
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_SESSION_TOKEN=your_session_token  # optional
+AWS_REGION=us-west-2
+AWS_S3_BUCKET=your_s3_bucket_name
+
+SUPABASE_URL=https://your.supabase.url
+SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_USER_ID=your_test_user_id
+```
+
+---
+
+## 🧠 Configuration
+
+Edit `config/config.yaml` for:
+
+- Model IDs (Bedrock, Claude)
+- FAISS confidence threshold
+- Language toggle (e.g., Hinglish support)
+- Memory enable/disable
+
+---
+
+## 📦 Data Requirements
+
+Place the following in `Data/`:
+
+```
+qa_dataset.csv         # Base Q&A pairs
+qa_embeddings.npy      # SentenceTransformer embeddings
+qa_faiss_index.bin     # FAISS index
+test.csv               # Input test file
+userinputvoice/        # Folder for audio inputs
+voicebotoutput/        # Folder for TTS outputs
+```
+
+> 🔄 To generate embeddings & FAISS index:
+```bash
+python modules/utils.py --build-index
+```
+
+---
+
+## 🧪 Usage Guide
+
+### 1️⃣ Batch QA (CSV)
 
 ```bash
 python run_inference.py
 ```
 
-This will:
-1. Read questions from `test.csv`
-2. Match against `qa_dataset.csv`
-3. Generate responses using AWS Bedrock if needed
-4. Save results to `output/output.csv`
+- Reads `Data/test.csv`
+- Writes to `output/output.csv` with:
+  - Matched answer
+  - Source (Dataset/LLM)
+  - Confidence
 
-### Round 2: Voice Interface
+### 2️⃣ Gradio Live Demo
 
 ```bash
 python main.py
 ```
 
-This will:
-1. Launch Gradio web interface
-2. Enable microphone/file input
-3. Process audio through AWS services
-4. Display text response and play audio
+Opens at `http://127.0.0.1:7860` with tabs:
 
-## AWS Setup
+- **Authentication** – Sign in/out via Supabase
+- **Voice Assistant** – Speak or upload audio, get response
+- **Chat Inference** – Text-based fallback
+- **About** – Info and system overview
 
-1. Required Services:
-   - AWS Transcribe
-   - AWS Polly
-   - AWS Bedrock (optional)
-   - S3 bucket for audio files
+### 3️⃣ User Signup (Supabase)
 
-2. IAM Permissions:
-   - Transcribe access
-   - Polly access
-   - S3 read/write
-   - Bedrock model access
+```bash
+python create_test_user.py
+```
 
-## Error Handling
+- Creates and logs in a test user
+- Stores test conversations via Supabase
+- Updates `.env` with `SUPABASE_USER_ID`
 
-- Audio transcription failures
-- Network connectivity issues
-- Low confidence matches
-- AWS service quotas
+---
 
-## Performance Notes
+### 🧪 Run Tests
 
-- Fuzzy matching threshold: 80%
-- Audio sampling rate: 16kHz
-- Response generation time: ~2-3s
-- Voice synthesis quality: Neural engine
+```bash
+pytest
+```
 
-## Development
+- `Test/test_qa.py` – Batch QA pipeline
+- `Test/test_signup.py` – Supabase auth
 
-- Python 3.8+
-- Code formatting: Black
-- Type hints included
-- Modular architecture
-- Easy to extend
+---
 
-## License
+## 📁 Project Structure
 
-MIT License
+```
+MatrixVoiceBot/
+├── .env
+├── config/
+│   └── config.yaml
+├── create_test_user.py
+├── main.py                  # Gradio UI
+├── run_inference.py         # Batch mode
+├── modules/
+│   ├── aws_asr.py           # Transcribe wrapper
+│   ├── aws_tts.py           # Polly wrapper
+│   ├── response_gen.py
+│   ├── response_gen_rag.py
+│   ├── response_gen_ragb.py # With memory
+│   ├── supabase_client.py
+│   ├── vector_memory.py
+│   └── utils.py
+├── Data/
+│   ├── qa_dataset.csv
+│   ├── qa_embeddings.npy
+│   ├── qa_faiss_index.bin
+│   ├── test.csv
+│   ├── userinputvoice/
+│   └── voicebotoutput/
+├── output/
+│   └── output.csv
+├── Test/
+│   ├── test_qa.py
+│   └── test_signup.py
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## 🔮 Future Enhancements
+
+- 🌐 Multilingual support (Hindi, Bengali, Marathi)
+- 💬 Local LLM fallback (e.g., Ollama, LM Studio)
+- 🧠 Dynamic RAG with live retraining
+- 📈 Analytics dashboard (Supabase/Streamlit)
+- 🔗 CRM + WhatsApp Integration
+
+---
+
+## 💸 AWS Cost Disclaimer
+
+> AWS Transcribe, Polly, and Bedrock services may incur charges beyond the free tier. Monitor your usage via the [AWS Console](https://console.aws.amazon.com/).
+
+---
+
+## 🤝 Contributing
+
+1. Fork this repo
+2. Create a feature branch
+3. Add your feature or fix with tests
+4. Submit a pull request 🚀
+
+---
+
+## 📜 License
+
+MIT License. See `LICENSE`.
