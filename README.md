@@ -39,6 +39,9 @@ Built with AWS Transcribe (STT), Polly (TTS), Bedrock (LLM), FAISS for semantic 
   - `response_gen_rag.py`: Vanilla FAISS + polishing
   - `response_gen_ragb.py`: Hinglish + vector memory for deep context
 
+     
+![image](https://github.com/user-attachments/assets/8abb9abf-b618-4ccf-b6dc-7ab6d02bee2a)
+
 ### 🔐 Supabase Integration
 - Signup/login with `create_test_user.py`
 - Persistent conversation storage via `modules/supabase_client.py`
