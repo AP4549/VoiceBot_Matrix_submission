@@ -477,6 +477,18 @@ def create_gradio_interface(voicebot):
             background: rgba(255, 255, 255, 0.1);
             backdrop-filter: blur(10px);
         }
+        .tab-nav button,
+        .tab-nav button.selected,
+        .tab-nav button:focus,
+        .tab-nav button:active,
+        .tab-nav button[aria-selected="true"] {
+            color: white !important;
+            font-weight: bold !important;
+            text-shadow: none !important;
+        }
+        .tab-nav .tab-indicator {
+            background: white !important;
+        }
         .small-btn button {
             width: 34px;
             height: 34px;
@@ -499,7 +511,7 @@ def create_gradio_interface(voicebot):
         )
         # Create blocks interface with custom CSS
         with gr.Blocks(title="Voice Assistant", theme=theme, css=css) as interface:
-            gr.Markdown("# 🎙️ Voice Assistant")
+            gr.Markdown("# 🎙️ LenDenMitra")
             
             # Authentication section
             with gr.Tab("Authentication"):
