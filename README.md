@@ -66,7 +66,7 @@ Built with AWS Transcribe (STT), Polly (TTS), Bedrock (LLM), FAISS for semantic 
 - Supabase project with:
   - Supabase URL
   - Anon key
--ffmpeg-git-full.7z (For conversion of audio to correct template for AWS Transcribe) 
+- ffmpeg-git-full.7z (For conversion of audio to correct template for AWS Transcribe) 
 
 ### 💻 Setup
 
