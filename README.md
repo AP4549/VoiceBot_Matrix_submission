@@ -28,6 +28,9 @@ Built with AWS Transcribe (STT), Polly (TTS), Bedrock (LLM), FAISS for semantic 
   - Confidence score
   - Source: `Dataset` / `LLM`
 
+![image](https://github.com/user-attachments/assets/4b75106c-6c51-41df-9cb7-6cec3af158bb)
+
+
 ### 🎙️ Interactive Voice Assistant (`main.py`)
 - Real-time mic input and audio file upload
 - **Speech-to-Text**: AWS Transcribe  
