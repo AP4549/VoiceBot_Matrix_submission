@@ -2,8 +2,7 @@
 .env
 
 # Data folder
-Data/
-output/
+
 
 
 # Python
